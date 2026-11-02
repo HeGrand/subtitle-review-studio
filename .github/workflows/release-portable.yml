@@ -1,0 +1,70 @@
+name: Build Windows portable release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+([-.][A-Za-z0-9.]+)?$') { throw 'Invalid version tag' }
+      - name: Prepare runtime and run unit checks
+        shell: pwsh
+        run: |
+          python -m pip install --target .runtime/deps -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency preparation failed' }
+          $env:PYTHONPATH = Join-Path $pwd '.runtime/deps'
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+      - name: Prepare optional NVIDIA runtime
+        shell: pwsh
+        run: ./scripts/prepare_gpu.ps1
+      - name: Download public model and build portable folder
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = Join-Path $pwd '.runtime/deps'
+          python -c "from faster_whisper.utils import download_model; download_model('large-v3-turbo', output_dir='.runtime/build-model')"
+          if ($LASTEXITCODE -ne 0) { throw 'Model preparation failed' }
+          $redist = Get-ChildItem 'C:/Program Files/Microsoft Visual Studio/*/*/VC/Redist/MSVC/*/x64' -Directory | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $redist) { throw 'Visual C++ x64 redistributable folder not found' }
+          python scripts/build_portable.py --output "$env:RUNNER_TEMP/portable-build" --model .runtime/build-model --vc-redist $redist.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Portable build failed' }
+          $root = Join-Path $env:RUNNER_TEMP 'portable-build/字幕工作室_Windows便携版'
+          Copy-Item LICENSE,THIRD_PARTY_NOTICES.md -Destination $root
+          $metaPath = Join-Path $root 'portable.json'
+          $meta = Get-Content -LiteralPath $metaPath -Raw | ConvertFrom-Json
+          $meta.version = $env:RELEASE_TAG
+          $meta | ConvertTo-Json | Set-Content -LiteralPath $metaPath -Encoding utf8
+      - name: Package separate core and GPU assets
+        shell: pwsh
+        run: |
+          python scripts/package_release.py --root "$env:RUNNER_TEMP/portable-build/字幕工作室_Windows便携版" --output release-assets --tag $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { throw 'Release packaging failed' }
+      - name: Create draft and publish complete release
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG --draft --target $env:GITHUB_SHA --title "字幕工作室 $env:RELEASE_TAG · Windows 预览版" --notes-file docs/RELEASE_NOTES.md
+          if ($LASTEXITCODE -ne 0) { throw 'Release draft could not be created (tag may already exist)' }
+          $assets = Get-ChildItem -LiteralPath release-assets -File | ForEach-Object FullName
+          gh release upload $env:RELEASE_TAG @assets
+          if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft' }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

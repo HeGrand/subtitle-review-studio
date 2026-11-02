@@ -1,0 +1,5 @@
+# Optional NVIDIA Windows runtime packages; not required for CPU operation.
+nvidia-cublas-cu12==12.8.3.14
+nvidia-cudnn-cu12==9.8.0.87
+nvidia-cuda-runtime-cu12==12.8.57
+nvidia-cuda-nvrtc-cu12==12.8.61
