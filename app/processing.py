@@ -296,6 +296,9 @@ class Processor:
                 self.update(project, key, status='paused', message=str(exc))
                 break
             except Exception as exc:
-                self.update(project, key, status='failed', message=str(exc), seconds=round(time.monotonic() - started, 2))
+                from .job_errors import explain_error
+                error = explain_error(exc)
+                self.update(project, key, status='failed', message=error['title'], error=error,
+                            seconds=round(time.monotonic() - started, 2))
             finally:
                 self.child = None

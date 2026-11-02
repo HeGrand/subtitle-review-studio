@@ -133,7 +133,8 @@ def export_ai(project, folder, full=False):
         episode_index.append({'episode': ep, 'video_version': e['video_version'], 'duration_ms': e['duration_ms'],
                                'original_srt': original, 'current_srt': current,
                                'transcript': transcript if transcript_ok else None, 'full_audio': audio if audio_ok else None,
-                               'local_status': e['local_status'], 'source_fingerprints': {'srt': e['srt_fingerprint'], 'media': e.get('media_fingerprint')}})
+                               'local_status': e['local_status'], 'local_job': project.data['jobs'].get(ep, {}),
+                               'source_fingerprints': {'srt': e['srt_fingerprint'], 'media': e.get('media_fingerprint')}})
     for c in project.data['cues']:
         row = c['accepted']
         entries.append({'stable_id': c['id'], 'episode': c['episode'], 'original_number': c['source_number'],

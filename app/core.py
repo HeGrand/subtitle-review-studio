@@ -291,6 +291,10 @@ class Project:
         d = copy.deepcopy({k: v for k, v in self.data.items() if k not in ('history', 'ai_rounds')})
         d['ai_rounds'] = copy.deepcopy([{k: v for k, v in r.items() if k != 'index'} for r in self.data['ai_rounds']])
         d['root'] = str(self.root)
+        from .job_errors import explain_error
+        for job in d['jobs'].values():
+            if job.get('status') == 'failed' and not job.get('error'):
+                job['error'] = explain_error(job.get('message', '未知错误'))
         d['fingerprint'] = self.source_fingerprint()
         d['history_count'] = len(self.data['history'])
         for c in d['cues']:
@@ -352,6 +356,45 @@ class Project:
             self.data['version'] += 1
             self.commit('导入字幕与素材配对', extra={'results': results})
         return results
+
+    def manage_episode(self, episode, action, reason=''):
+        """Reversible exclusion affects this project only; never unlink source files."""
+        archived = self.data.setdefault('excluded_episodes', {})
+        if action == 'restore':
+            if episode not in archived or episode in self.data['episodes']:
+                raise UserError('此集无法恢复，可能已重新导入同集素材。')
+            record = archived.pop(episode)
+            self.data['episodes'][episode] = record['episode']
+            if record['job'] is not None:
+                self.data['jobs'][episode] = record['job']
+            for name, rows in record['rows'].items():
+                self.data.setdefault(name, []).extend(rows)
+            self.data['version'] += 1
+        else:
+            if episode not in self.data['episodes']:
+                raise UserError('此集不在当前项目。')
+            if action not in ('skip', 'exclude') or not reason.strip():
+                raise UserError('请选择处理方式并填写原因。')
+            if action == 'skip':
+                job = self.data['jobs'].setdefault(episode, {})
+                if job.get('status') not in ('failed', 'paused'):
+                    raise UserError('只有失败或暂停的初查可以跳过。')
+                job.update(status='skipped', skip_reason=reason.strip(), message='已跳过初查；保留字幕，缺失证据如实交给AI')
+                self.data['episodes'][episode]['local_status'] = '用户跳过本地初查，未视为初查成功：' + reason.strip()
+            else:
+                record = {'episode': self.data['episodes'].pop(episode), 'job': self.data['jobs'].pop(episode, None),
+                          'rows': {}, 'reason': reason.strip(), 'at': now()}
+                for name in ('cues', 'issues', 'review_tasks', 'opinion_conflicts', 'review_limits'):
+                    rows = self.data.get(name, [])
+                    def belongs(row):
+                        return str(row.get('episode', row.get('opinion', {}).get('episode', ''))) == episode
+                    record['rows'][name] = [row for row in rows if belongs(row)]
+                    self.data[name] = [row for row in rows if not belongs(row)]
+                archived[episode] = record
+                self.data['version'] += 1
+        self.commit({'skip': '跳过本集初查', 'exclude': '从本轮移出集数', 'restore': '恢复移出集数'}[action],
+                    extra={'episode': episode, 'reason': reason})
+        return {'episode': episode, 'action': action}
 
     def relink(self, episode, path, kind='media'):
         ep = self.data['episodes'][episode]
@@ -508,6 +551,8 @@ class Project:
 
     def undo(self):
         for h in reversed(self.data['history']):
+            if h['label'] in ('从本轮移出集数', '恢复移出集数'):
+                raise UserError('集数范围已调整；请使用素材页的恢复入口。此前人工记录仍保留，不能跨越范围调整撤销。')
             if not h['undone'] and (h['before'] or h.get('extra', {}).get('added') or h.get('extra',{}).get('issues_before')):
                 index = self.by_id()
                 for old in h['before']:

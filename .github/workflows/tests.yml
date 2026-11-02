@@ -52,5 +52,7 @@ jobs:
           if (-not $env:REVIEW_BROWSER_PATH) { $env:REVIEW_BROWSER_PATH = 'C:/Program Files/Google/Chrome/Application/chrome.exe' }
           node tests/file_access_ui_check.cjs
           if ($LASTEXITCODE -ne 0) { throw 'File access UI check failed' }
+          node tests/job_recovery_ui_check.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Failed episode recovery UI check failed' }
           node tests/desktop_drop_check.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Desktop drag-and-drop check failed' }

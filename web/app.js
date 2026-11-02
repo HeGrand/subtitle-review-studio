@@ -16,7 +16,7 @@ let completionPromptBusy=false;
 function initialCheckCompletionKey(project,processing){
  if(!project||processing)return '';
  const episodes=Object.keys(project.episodes).sort();
- if(!episodes.length||!episodes.every(ep=>project.jobs[ep]?.status==='done'&&project.episodes[ep].transcript))return '';
+ if(!episodes.length||!episodes.every(ep=>project.jobs[ep]?.status==='skipped'||(project.jobs[ep]?.status==='done'&&project.episodes[ep].transcript)))return '';
  return 'subtitle-initial-complete:'+project.project_id+':'+JSON.stringify(episodes.map(ep=>[ep,project.jobs[ep],project.episodes[ep].transcript]));
 }
 async function offerAIExport(){
@@ -26,7 +26,8 @@ async function offerAIExport(){
  try{
   sessionStorage.setItem(key,'shown');
   const projectId=p().project_id;
-  const dialog=showDialog('全部集数本地初查已完成',`<p>共 ${Object.keys(p().episodes).length} 集已完成本地语音识别和初查。下一步导出 AI 交接包，由 AI 对照字幕、剧本及上下文审查。</p><p>是否现在前往“AI 交接与导出”？</p>`,'前往 AI 交接与导出');
+  const skipped=Object.keys(p().episodes).filter(ep=>p().jobs[ep]?.status==='skipped');
+  const dialog=showDialog(skipped.length?'本轮初查已结束，部分集数已跳过':'全部集数本地初查已完成',`<p>${Object.keys(p().episodes).length-skipped.length} 集已完成本地语音识别和初查。${skipped.length?`另有 ${skipped.length} 集跳过初查，AI包将如实保留缺失证据说明，不算初查成功。`:''}下一步导出 AI 交接包，由 AI 对照字幕、剧本及上下文审查。</p><p>是否现在前往“AI 交接与导出”？</p>`,'前往 AI 交接与导出');
   $('modal-cancel').textContent='稍后';
   const result=await dialog;
   $('modal-cancel').textContent='取消';
@@ -101,7 +102,15 @@ function renderMaterials(){
  const modelValue=$('model-select').value;const opts=state.models.map(m=>`<option value="${esc(m)}">${bundled(m)?'内置多语言模型 · '+esc(m.split(/[\\/]/).at(-1)):'已有本地资源 · '+esc(m.split(/[\\/]/).at(-4)||'Whisper')}</option>`).join('');
  $('model-select').innerHTML=`<option value="">${state.models.some(bundled)?'使用内置多语言模型（无需下载）':'首次自动下载 small 多语言模型'}</option>`+opts+(modelOverride?`<option value="${esc(modelOverride)}">指定资源 · ${esc(modelOverride)}</option>`:'');
  $('model-select').value=modelOverride||modelValue||(state.models[0]||'');
- $('episode-status').innerHTML=Object.entries(p().episodes).map(([ep,e])=>{const j=p().jobs[ep]||{};return `<div class="episode-status-row ${esc(j.status||'')}"><b>第 ${esc(ep)} 集</b><span>${esc(j.message||e.local_status)}${j.seconds?`<small> · 本次 ${j.seconds}s / 音频 ${j.audio_seconds||'?'}s</small>`:''}${e.warnings.length?`<small> · ${esc(e.warnings.join('；'))}</small>`:''}</span><progress max="100" value="${j.progress||0}"></progress><button data-retry="${ep}">${j.status==='failed'?'重试':'处理 / 继续'}</button><button data-relink="${ep}">重新定位</button></div>`;}).join('')||'<div class="empty">导入素材后，这里会显示每集进度。</div>';
+ const expandedJobs=new Set([...$('episode-status').querySelectorAll('details[open][data-error-ep]')].map(d=>d.dataset.errorEp));
+ const expandedExcluded=!!$('episode-status').querySelector('.excluded-episodes[open]');
+ $('episode-status').innerHTML=Object.entries(p().episodes).map(([ep,e])=>{
+  const j=p().jobs[ep]||{},error=j.status==='failed'?(j.error||{title:'本集初查未完成',action:'请查看详细错误；可以重试、重新定位，或跳过本集初查。',detail:j.message}):null;
+  return `<div class="episode-status-row ${esc(j.status||'')}"><b>第 ${esc(ep)} 集</b><span>${esc(error?.title||j.message||e.local_status)}${j.seconds?`<small> · 本次 ${j.seconds}s / 音频 ${j.audio_seconds||'?'}s</small>`:''}${e.warnings.length?`<small> · ${esc(e.warnings.join('；'))}</small>`:''}${error?`<p>${esc(error.action)}</p><details data-error-ep="${ep}" ${expandedJobs.has(ep)?'open':''}><summary>详细错误与处理入口</summary><pre>${esc(error.detail)}</pre><button data-copy-error="${ep}">复制错误</button><button data-job-action="skip" data-job-episode="${ep}">跳过本集初查</button><button data-job-action="exclude" data-job-episode="${ep}">从本轮移出（可恢复）</button></details>`:''}${j.status==='skipped'?'<small> · 保留字幕参与文字审查，未标为初查成功</small>':''}${j.status==='paused'?`<button data-job-action="skip" data-job-episode="${ep}">跳过本集初查</button>`:''}</span><progress max="100" value="${j.progress||0}"></progress><button data-retry="${ep}" ${state.processing?'disabled':''}>${j.status==='failed'?'重试':j.status==='skipped'?'重新初查':'处理 / 继续'}</button><button data-relink="${ep}" ${state.processing?'disabled':''}>重新定位</button></div>`;
+ }).join('')||'<div class="empty">导入素材后，这里会显示每集进度。</div>';
+ const archived=Object.entries(p().excluded_episodes||{});
+ if(archived.length)$('episode-status').innerHTML+=`<details class="excluded-episodes" ${expandedExcluded?'open':''}><summary>已从本轮移出 ${archived.length} 集（不参与本轮导出，可恢复）</summary>${archived.map(([ep,r])=>`<p>第 ${esc(ep)} 集：${esc(r.reason)} <button data-job-action="restore" data-job-episode="${ep}">恢复本集</button></p>`).join('')}</details>`;
+
 }
 function renderExchange(){
  $('term-groups').innerHTML=(p().term_groups||[]).map(g=>`<article class="opinion-card"><b>${esc(g.canonical)} · ${g.members.length} 处 · ${g.pending} 处待统一</b><p>${esc(g.meaning_warning)}</p><details><summary>预览本组全部位置及已保护项</summary>${g.members.map(m=>`<p>第${m.episode}集 #${m.number}：${esc(m.text)} ${m.protected?'【保留人工进度】':m.handled?'【已处理】':''}${m.other_problem?'【另有问题需保留】':''}</p>`).join('')}</details><button data-term-group="${g.id}" ${g.pending?'':'disabled'}>确认本组统一方式</button></article>`).join('')||'<div class="empty">未发现需要集中确认的重复术语。</div>';
@@ -261,7 +270,7 @@ async function cleanCache(){await flush();releasePlayer();const plan=await mutat
 on('new-project',()=>projectDialog(true));on('home-create',()=>projectDialog(true));on('open-project',()=>projectDialog(false));on('home-open',()=>projectDialog(false));
 on('save-close',async()=>{await mutationQueue.catch(()=>{});await flush();releasePlayer();await request('close');resetProjectUI();await refresh();toast('项目已保存并关闭，待审状态保留');});
 on('manual-save',async()=>{await mutate('save');toast('项目进度已保存');});on('clear-cache',cleanCache);on('scan',scan);on('manual-pair',manualPair);
-on('choose-model',async()=>{const folder=await picker();if(folder){modelOverride=folder;renderMaterials();}});on('process-all',()=>processEpisodes(Object.keys(p().episodes)));on('pause-jobs',async()=>{await request('pause');await refresh();toast('任务已暂停，已完成分段保留');});
+on('choose-model',async()=>{const folder=await picker();if(folder){modelOverride=folder;renderMaterials();}});on('process-all',()=>processEpisodes(Object.keys(p().episodes).filter(ep=>!['done','skipped'].includes(p().jobs[ep]?.status))));on('pause-jobs',async()=>{await request('pause');await refresh();toast('任务已暂停，已完成分段保留');});
 on('model-select',()=>{const value=$('model-select').value;modelOverride=state.models.includes(value)?'':value;$('model-path').value=value;},'change');
 on('model-path',()=>{modelOverride=$('model-path').value.trim();renderMaterials();},'change');
 on('acceleration-reset',async()=>{await mutate('acceleration-reset');toast('已清除本机测速结果，下次需要识别时会重新检测；已有字幕和识别稿保持原样');});
@@ -283,6 +292,14 @@ document.addEventListener('click',handle(async e=>{
  const b=e.target.closest('button');if(!b)return;
  if(b.dataset.recent!==undefined){await flush();releasePlayer();await request('open',{folder:state.recent[+b.dataset.recent].path});resetProjectUI();await refresh();}
  if(b.dataset.reference)await window.localFiles.chooseReference(b.dataset.reference);
+ if(b.dataset.copyError){const ep=b.dataset.copyError,j=p().jobs[ep];await navigator.clipboard.writeText(`第 ${ep} 集\n${j.error?.title||j.message}\n${j.error?.action||''}\n${j.error?.detail||j.message}`);toast('详细错误已复制');}
+ if(b.dataset.jobAction){
+  if(state.processing)throw Error('请先暂停正在运行的初查，再处理此集');
+  const action=b.dataset.jobAction,ep=b.dataset.jobEpisode;
+  const descriptions={skip:'保留本集字幕和人工进度，跳过本地识别。AI包会注明缺失证据；已有字幕仍需完成实际文字审查。',exclude:'将本集及相关审查事项从本轮移出，不再参与本轮导出。原文件、缓存和人工进度保留，可在列表下方恢复。',restore:'恢复本集及原有人工进度，重新参与本轮导出。'};
+  const d=await showDialog(`第 ${ep} 集：${{skip:'跳过初查',exclude:'从本轮移出',restore:'恢复本集'}[action]}`,`<p>${descriptions[action]}</p>${action==='restore'?'':'<label>处理原因<input name="reason" required placeholder="例如：反复失败，先交AI文字审查"></label>'}`,'确认');
+  if(d){await mutate('episode-manage',{episode:ep,action,reason:d.reason||''});toast(action==='restore'?'本集及原有进度已恢复':'已记录处理方式，可以继续其他集数');}
+ }
  if(b.dataset.retry)await processEpisodes([b.dataset.retry]);
  if(b.dataset.relink){const path=await picker('media');if(path){await mutate('relink',{episode:b.dataset.relink,path});toast('相同指纹素材已重新关联');}}
  if(b.dataset.episode){await flush();episode=b.dataset.episode;selected.clear();renderReview();}

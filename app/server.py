@@ -314,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
             return import_document(p,b['name'],b['content'],b['kind'])
         if route == 'relink':
             return p.relink(b['episode'], b['path'], b.get('kind', 'media'))
+        if route == 'episode-manage':
+            return p.manage_episode(b['episode'], b['action'], b.get('reason', ''))
         if route == 'process':
             return STATE.processor.start(p, b['episodes'], b.get('model', ''), b.get('download_model', 'small'))
         if route == 'acceleration-reset':
