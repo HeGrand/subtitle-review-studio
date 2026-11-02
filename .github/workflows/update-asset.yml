@@ -1,0 +1,41 @@
+name: Build small desktop update
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing published release tag'
+        required: true
+        default: 'v0.2.0'
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Invalid tag' }
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop dependencies failed' }
+          python scripts/prepare_desktop.py
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop runtime failed' }
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          $asset = "release-assets/SubtitleReviewStudio-$env:RELEASE_TAG-update.zip"
+          python scripts/package_update.py --output $asset
+          if ($LASTEXITCODE -ne 0) { throw 'Update package failed' }
+          gh release upload $env:RELEASE_TAG $asset "$asset.sha256.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'Update asset upload failed' }

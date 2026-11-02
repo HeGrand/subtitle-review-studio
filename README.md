@@ -10,6 +10,7 @@ A local-first subtitle review workbench for Windows: Whisper transcription, auto
 
 普通用户请到 [Releases](https://github.com/HeGrand/subtitle-review-studio/releases) 下载 Windows 便携版。GitHub 页面上的 **Code → Download ZIP 是源码，不包含运行环境或识别模型**。
 
+- **已有旧版**：可只下载`update.zip`，关闭旧程序后覆盖到程序目录；不必重下模型/GPU，详见安装说明。
 - **主程序包**：内含 Python、依赖、FFmpeg 和多语言识别模型，解压后可用 CPU 初查。
 - **GPU 组件包（可选）**：NVIDIA 用户将它解压到主程序目录，合并 `.runtime` 文件夹，即可自动测速并启用 GPU。无需安装系统 CUDA。
 - 发布附件附带 SHA-256 清单。请完整解压后双击 **启动字幕审查.cmd**，不要在压缩包内直接运行。
