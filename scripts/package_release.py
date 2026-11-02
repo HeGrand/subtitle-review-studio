@@ -19,7 +19,7 @@ def make_zip(path,files,extra):
     return sha(path)
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--output',required=True);parser.add_argument('--tag',default='v0.1.0')
+    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--output',required=True);parser.add_argument('--tag',default='v0.2.0')
     args=parser.parse_args();root=Path(args.root).resolve();out=Path(args.output).resolve()
     if not re.fullmatch(r'v\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.]+)?',args.tag):raise ValueError('Use a version tag such as v0.1.0')
     if out.is_relative_to(root):raise ValueError('Output must be outside the portable folder')
@@ -29,7 +29,7 @@ def main():
     for p in sorted(root.rglob('*')):
         if not p.is_file():continue
         relative=p.relative_to(root).as_posix()
-        if p.is_symlink() or p.name in FORBIDDEN or '__pycache__' in p.parts or p.suffix=='.pyc':raise ValueError('Private state or nonportable file: '+relative)
+        if p.is_symlink() or p.name in FORBIDDEN or 'desktop-user-data' in p.parts or '__pycache__' in p.parts or p.suffix=='.pyc':raise ValueError('Private state or nonportable file: '+relative)
         if relative=='文件清单_SHA256.json':continue
         item={'path':relative,'bytes':p.stat().st_size,'sha256':sha(p)}
         (gpu if relative.startswith('.runtime/gpu/') else core).append((p,item))

@@ -3,12 +3,12 @@ const {spawn}=require('node:child_process');const path=require('node:path');cons
 const helper=require('../web/review-helpers');
 assert.match(helper.summary({reason:'无法确认实际对白，音频可读取，但未试听。',evidence:[]}).problem,/未给出具体/);
 assert.match(helper.summary({reason:'用词不同',evidence:[]}).script,/不能据此判定无台词/);
-const root=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'subtitle-review-ui-'));
+const root=fs.mkdtempSync(path.join(process.env.REVIEW_TEST_ROOT||require('node:os').tmpdir(),'subtitle-review-ui-'));
 (async()=>{
  const server=spawn('python',['tests/review_ui_fixture.py',root],{cwd:path.resolve('.'),env:{...process.env,PYTHONUTF8:'1',PYTHONPATH:path.resolve('.')+path.delimiter+path.resolve('.runtime/deps')},windowsHide:true});let browser;
  try{
  const url=await new Promise((resolve,reject)=>{server.stdout.on('data',b=>{const m=b.toString().match(/http:\/\/127.0.0.1:\d+\//);if(m)resolve(m[0]);});server.stderr.on('data',b=>process.stderr.write(b));server.on('exit',c=>reject(Error('fixture exited '+c)));});
- browser=await chromium.launch({headless:true});
+ browser=await chromium.launch({headless:true,...(process.env.REVIEW_BROWSER_PATH?{executablePath:process.env.REVIEW_BROWSER_PATH}:{})});
  const page=await browser.newPage({viewport:{width:1540,height:1080}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(url);await page.click('#home-open');await page.fill('#project-folder',path.join(root,'project'));await page.click('#modal-ok');await page.waitForSelector('#workspace:not([hidden])');await page.click('[data-tab="review"]');await page.locator('.cue-row').first().click();
  assert.equal(await page.locator('#opinion-list .opinion-card').count(),2);assert.match(await page.locator('#opinion-list .opinion-card').first().innerText(),/最新/);assert.match(await page.locator('#opinion-list .opinion-card').first().innerText(),/Hello there/);assert(!(await page.locator('#opinion-list').innerText()).includes('evidence/'));

@@ -1,5 +1,4 @@
 import argparse
-import base64
 import copy
 import json
 import mimetypes
@@ -7,7 +6,6 @@ import os
 import re
 import secrets
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -21,54 +19,9 @@ from .core import APP_ROOT, Project, UserError, atomic_json, read_json, scan_pai
 from .processing import Processor, waveform
 from .exchange import export_srt, export_ai, import_opinions, backup
 from .acceleration import public_status
+from . import __version__
+from .file_access import browse,make_directory,import_document
 
-PICKER_LOCK = threading.Lock()
-
-
-def system_picker(kind='folder'):
-    if os.name != 'nt':
-        raise UserError('系统选择器仅支持 Windows；也可以在路径框填入完整路径。')
-    if kind == 'folder':
-        body = """
-$d=New-Object System.Windows.Forms.Form; $d.Text='选择文件夹（可直接粘贴路径）';
-$d.Size=New-Object System.Drawing.Size(760,205); $d.StartPosition='CenterScreen'; $d.TopMost=$true;
-$label=New-Object System.Windows.Forms.Label; $label.Text='文件夹完整路径（支持共享盘路径）：'; $label.SetBounds(18,15,700,24);
-$pathBox=New-Object System.Windows.Forms.TextBox; $pathBox.Name='FolderPath'; $pathBox.SetBounds(18,44,590,30);
-$browse=New-Object System.Windows.Forms.Button; $browse.Text='浏览…'; $browse.SetBounds(620,42,105,32);
-$errorLabel=New-Object System.Windows.Forms.Label; $errorLabel.ForeColor=[System.Drawing.Color]::Firebrick; $errorLabel.SetBounds(18,80,700,28);
-$ok=New-Object System.Windows.Forms.Button; $ok.Text='确定'; $ok.SetBounds(500,116,105,32);
-$cancel=New-Object System.Windows.Forms.Button; $cancel.Text='取消'; $cancel.SetBounds(620,116,105,32); $cancel.DialogResult='Cancel';
-$browse.Add_Click({$browser=New-Object System.Windows.Forms.FolderBrowserDialog; try{if(Test-Path -LiteralPath $pathBox.Text -PathType Container){$browser.SelectedPath=$pathBox.Text}; if($browser.ShowDialog($d) -eq 'OK'){$pathBox.Text=$browser.SelectedPath}}finally{$browser.Dispose()}});
-$ok.Add_Click({$candidate=$pathBox.Text.Trim().Trim([char]34); if([System.IO.Path]::IsPathRooted($candidate) -and (Test-Path -LiteralPath $candidate -PathType Container)){$d.Tag=[System.IO.Path]::GetFullPath($candidate);$d.DialogResult='OK'}else{$errorLabel.Text='请输入存在的文件夹完整路径，或点击浏览。';$pathBox.Focus()}});
-$d.Controls.AddRange(@($label,$pathBox,$browse,$errorLabel,$ok,$cancel)); $d.AcceptButton=$ok; $d.CancelButton=$cancel;
-$d.Add_Shown({$pathBox.Focus()});
-"""
-        output = '$d.Tag'
-    else:
-        filters = {'media': '音视频|*.mp4;*.mkv;*.mov;*.wav;*.mp3;*.m4a;*.flac;*.avi;*.webm|所有文件|*.*',
-                   'srt': '字幕|*.srt', 'json': 'JSON意见或进度|*.json', 'reference': '剧本与资料|*.docx;*.txt;*.md;*.pdf'}
-        body = "$d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='" + filters.get(kind, '所有文件|*.*') + "'"
-        output = '$d.FileName'
-    # A real topmost owner keeps the native modal dialog above the browser.
-    # Hidden console processes have no owner and Windows may otherwise open them behind it.
-    script = """$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;
-Add-Type -AssemblyName System.Windows.Forms;
-$owner=New-Object System.Windows.Forms.Form;
-$owner.Text='字幕工作室 · 选择文件'; $owner.TopMost=$true; $owner.ShowInTaskbar=$false;
-$owner.StartPosition='CenterScreen'; $owner.Size=New-Object System.Drawing.Size(1,1);
-$owner.Opacity=0; $owner.Show(); $owner.Activate();
-try { """ + body + "; if($d.ShowDialog($owner) -eq 'OK'){[Console]::Write(" + output + ")} } finally { if($d){$d.Dispose()}; $owner.Close(); $owner.Dispose() }"
-    encoded = base64.b64encode(script.encode('utf-16le')).decode()
-    if not PICKER_LOCK.acquire(blocking=False):
-        raise UserError('已有一个选择窗口打开，请先完成或取消该窗口。')
-    try:
-        result = subprocess.run(['powershell.exe', '-NoProfile', '-STA', '-EncodedCommand', encoded],
-                                capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-    finally:
-        PICKER_LOCK.release()
-    if result.returncode:
-        raise UserError('文件选择器无法启动，请使用完整路径输入。' + result.stderr.decode('utf-8', 'replace')[-300:])
-    return result.stdout.decode('utf-8-sig').strip()
 
 
 class State:
@@ -164,14 +117,16 @@ class Handler(BaseHTTPRequestHandler):
             if path in ('/', '/index.html'):
                 page = (APP_ROOT / 'web/index.html').read_text(encoding='utf-8').replace('__APP_TOKEN__', STATE.token)
                 return self.send(200, page.encode(), 'text/html; charset=utf-8')
-            if path in ('/style.css', '/review.css', '/app.js', '/review-helpers.js'):
+            if path in ('/style.css', '/review.css', '/app.js', '/review-helpers.js', '/file-access.js', '/file-access.css'):
                 return self.send(200, (APP_ROOT / 'web' / path[1:]).read_bytes(), 'text/css' if path.endswith('.css') else 'text/javascript; charset=utf-8')
             self.authorize()
+            if path == '/api/capabilities':
+                return self.send(200,{'version':__version__,'file_browser':True,'app_root':str(APP_ROOT)})
             if path == '/api/state':
                 with STATE.mutex:
                     STATE.client_check(self.headers.get('X-Client'))
                     return self.send(200, {'project': STATE.project.snapshot() if STATE.project else None, 'recent': STATE.recent(),
-                                           'models': models_available(), 'processing': STATE.processor.active(),'acceleration':public_status()})
+                                           'models': models_available(), 'processing': STATE.processor.active(),'acceleration':public_status(),'file_access':True})
             if path == '/api/waveform':
                 with STATE.mutex:
                     p = STATE.project
@@ -257,8 +212,12 @@ class Handler(BaseHTTPRequestHandler):
             route = urllib.parse.urlsplit(self.path).path.removeprefix('/api/')
             with STATE.mutex:
                 STATE.client_check(self.headers.get('X-Client'))
+            if route == 'browse':
+                return self.send(200,browse(body.get('path',''),body.get('kind','folder'),body.get('query','')))
+            if route == 'mkdir':
+                return self.send(200,{'path':make_directory(body.get('parent',''),body.get('name',''))})
             if route == 'pick':
-                return self.send(200, {'path': system_picker(body.get('kind', 'folder'))})
+                raise UserError('旧版系统选择窗口已停用，请刷新页面后使用统一文件浏览器')
             if route == 'pause':
                 STATE.processor.pause()
                 return self.send(200, {'ok': True})
@@ -286,6 +245,8 @@ class Handler(BaseHTTPRequestHandler):
                 p = STATE.project
                 if not p:
                     raise UserError('请先新建或打开项目。')
+                if body.get('project_id',p.data['project_id'])!=p.data['project_id']:
+                    raise UserError('项目已切换，请在目标项目重新操作')
                 readonly = route in ('cleanup-plan', 'save')
                 if not readonly and body.get('revision') != p.data['revision']:
                     raise UserError('页面版本已变化，请刷新后重试；修改未套用。')
@@ -349,6 +310,8 @@ class Handler(BaseHTTPRequestHandler):
             return p.save()
         if route == 'reference':
             return p.add_reference(b['path'], b['kind'])
+        if route == 'reference-upload':
+            return import_document(p,b['name'],b['content'],b['kind'])
         if route == 'relink':
             return p.relink(b['episode'], b['path'], b.get('kind', 'media'))
         if route == 'process':
@@ -372,7 +335,10 @@ class Handler(BaseHTTPRequestHandler):
                 return backup(p, folder, b.get('include_video', False))
             return export_srt(p, folder, b.get('episodes'), b['kind'] == 'delivery')
         if route == 'import':
-            return import_opinions(p, read_json(b['path']))
+            try:data=b['data'] if 'data' in b else read_json(b['path'])
+            except ValueError as error:raise UserError('AI意见JSON无法解析，请检查文件是否完整且为UTF-8格式') from error
+            if not isinstance(data,dict):raise UserError('AI意见JSON必须是一个完整对象')
+            return import_opinions(p,data)
         if route == 'legacy':
             return p.import_legacy(b['folder'], b['progress'])
         if route == 'resolve':
@@ -399,7 +365,7 @@ def main():
     server.daemon_threads = True
     STATE.port = server.server_address[1]
     url = f'http://127.0.0.1:{STATE.port}/'
-    atomic_json(runtime / 'server.json', {'url': url, 'pid': os.getpid()})
+    atomic_json(runtime / 'server.json', {'url': url, 'pid': os.getpid(),'app_root':str(APP_ROOT),'version':__version__})
     print('字幕审查已启动：' + url, flush=True)
     if not args.no_browser:
         webbrowser.open(url)

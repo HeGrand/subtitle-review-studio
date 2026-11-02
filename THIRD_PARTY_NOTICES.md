@@ -14,3 +14,5 @@ The MIT license in this repository applies to the project's original code. Third
 - **Playwright** — Apache-2.0; optional development test dependency, not required by the app.
 
 This source repository does not store third-party models, Python distributions, NVIDIA libraries, media, or project data in Git. Prepared portable packages carry the relevant notices alongside their runtime components.
+
+- **Electron / Chromium** — Electron is MIT; Chromium and its dependencies have their own notices. The optional desktop runtime is downloaded from the official Electron release with SHA-256 verification and retains its `LICENSE` and `LICENSES.chromium.html`.

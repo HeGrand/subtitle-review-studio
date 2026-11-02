@@ -38,3 +38,5 @@ npm run test:ui
 - GPU 测速与推理失败应能回退，暂停和继续不能丢失已完成分段。
 - 修改导出/导入字段时，同时更新 `app/resources` 内的 AI 流程和回传契约。
 - 不将 `.runtime`、模型、媒体、真实项目或个人测速数据提交到 Git。
+
+桌面与拖放检查：先执行`npm ci --ignore-scripts`和`python scripts/prepare_desktop.py`，再运行`node tests/desktop_drop_check.cjs`。普通浏览器检查用`node tests/file_access_ui_check.cjs`，可通过`REVIEW_BROWSER_PATH`选择已有Chrome。所有样本均为合成数据，真实UNC验证只在提供已存在、已有权限的测试共享路径时执行，不创建共享。

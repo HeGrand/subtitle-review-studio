@@ -47,18 +47,14 @@ async function request(route,body,method='POST'){
  const data=await response.json();if(!response.ok)throw Error(data.error||'操作失败');return data;
 }
 async function refresh(renderEditor=false){setState(await request('state',null,'GET'));render(renderEditor);}
-function mutate(route,body={}){const operation=async()=>{await flush();const data=await request(route,{...body,revision:p()?.revision});await refresh();return data.result;};const task=mutationQueue.catch(()=>{}).then(operation);mutationQueue=task;return task;}
+function mutate(route,body={}){const target=p()?.project_id;const operation=async()=>{await flush();if(target!==p()?.project_id)throw Error('项目已切换，请重新操作');const data=await request(route,{...body,project_id:target,revision:p()?.revision});await refresh();return data.result;};const task=mutationQueue.catch(()=>{}).then(operation);mutationQueue=task;return task;}
 function handle(fn){return async e=>{try{await fn(e);}catch(error){toast(error.message,true);$('save-status').textContent=dirty?'保存失败，请保留页面':'操作未完成';}};}
 function on(id,fn,event='click'){$(id).addEventListener(event,handle(fn));}
 let picking=false;
-async function picker(kind='folder'){
- if(picking){toast('选择窗口正在打开或等待选择，请先完成该窗口');return '';}
+async function picker(kind='folder',initial=''){
+ if(picking){toast('请先完成当前文件选择');return '';}
  picking=true;
- const buttons=[...document.querySelectorAll('[data-pick], [data-reference]')].filter(b=>!b.disabled);
- buttons.forEach(b=>b.disabled=true);
- toast('正在打开系统选择窗口，请在窗口中选择或取消…');
- try{const r=await request('pick',{kind});$('toast').hidden=true;return r.path;}
- finally{picking=false;buttons.forEach(b=>b.disabled=false);}
+ try{return await window.localFiles.pick(kind,initial);}finally{picking=false;}
 }
 
 function showDialog(title,content,ok='确定'){
@@ -71,8 +67,8 @@ function closeDialog(result){$('modal').close();const resolve=modalResolve;modal
 $('modal-cancel').onclick=()=>closeDialog(null);
 $('modal').addEventListener('cancel',e=>{e.preventDefault();closeDialog(null);});
 $('modal-form').addEventListener('submit',e=>{e.preventDefault();const values={};$('modal-content').querySelectorAll('[name]').forEach(el=>values[el.name]=el.type==='checkbox'?el.checked:el.value);closeDialog(values);});
-document.addEventListener('click',handle(async e=>{const b=e.target.closest('[data-pick]');if(!b)return;const path=await picker(b.dataset.kind);if(path)$(b.dataset.pick).value=path;}));
-function pathField(id,label,kind='folder',value=''){return `<label>${esc(label)}<div class="path-input"><input id="${id}" name="${id}" value="${esc(value)}" placeholder="选择文件或填写完整路径"><button type="button" data-pick="${id}" data-kind="${kind}">选择</button></div></label>`;}
+document.addEventListener('click',handle(async e=>{const b=e.target.closest('[data-pick]');if(!b)return;const path=await picker(b.dataset.kind,$(b.dataset.pick).value);if(path)$(b.dataset.pick).value=path;}));
+function pathField(id,label,kind='folder',value=''){return `<label>${esc(label)}<div class="path-input"><input id="${id}" name="${id}" data-path-kind="${kind}" value="${esc(value)}" placeholder="拖入对应文件或文件夹，或浏览/粘贴完整路径"><button type="button" data-pick="${id}" data-kind="${kind}">选择</button></div></label>`;}
 
 async function projectDialog(create){
  await mutationQueue.catch(()=>{});
@@ -80,7 +76,7 @@ async function projectDialog(create){
  if(!d)return;if(!d['project-folder'])throw Error('未选择文件夹，项目没有创建或切换。');
  releasePlayer();await request(create?'create':'open',{folder:d['project-folder'],name:d.name});resetProjectUI();await refresh();toast(create?'新项目已创建':'项目已打开，进度已恢复');
 }
-function resetProjectUI(){selected.clear();outsideSelected.clear();activeId=editorId=anchorId=episode='';modelOverride='';tab='materials';dirty=null;clearTimeout(saveTimer);$('media-dir').value='';$('srt-dir').value='';$('search').value='';$('filter-kind').value='';$('filter-status').value='pending';$('pair-results').hidden=true;$('export-result').hidden=true;editorEpoch++;}
+function resetProjectUI(){for(const id of ['opinion-source','reference-source'])$(id).textContent='';$('model-path').value='';selected.clear();outsideSelected.clear();activeId=editorId=anchorId=episode='';modelOverride='';tab='materials';dirty=null;clearTimeout(saveTimer);$('media-dir').value='';$('srt-dir').value='';$('search').value='';$('filter-kind').value='';$('filter-status').value='pending';$('pair-results').hidden=true;$('export-result').hidden=true;editorEpoch++;}
 function releasePlayer(){const player=$('player');player.pause();player.removeAttribute('src');player.load();$('subtitle-overlay').textContent='';playingEpisode='';clipOffset=0;peaks=[];drawWave();}
 
 function render(forceEditor=false){
@@ -101,6 +97,7 @@ function renderMaterials(){
  $('acceleration-status').textContent=state.acceleration===undefined?'后台尚未更新为自动加速版，请保存关闭项目后重启本应用。':speed.message?`${speed.message}${measure.cuda?.seconds!=null?` · GPU ${measure.cuda.seconds.toFixed(2)}秒`:''}${measure.cpu?.seconds!=null?` / CPU ${measure.cpu.seconds.toFixed(2)}秒`:''}（相同短段测速）`:'自动检测设备；首次使用同段音频比较 GPU 和 CPU 速度，之后复用结果。GPU不可用时自动改用CPU。';
  $('reference-list').innerHTML=p().references.map(r=>`<div class="reference-item">${esc({script:'剧本',names:'人物名表',terms:'术语表'}[r.kind])} · ${esc(r.name)}<small>${esc(r.warning)}</small></div>`).join('');
  const bundled=m=>m.replaceAll('\\','/').includes('/.runtime/models/');
+ if(document.activeElement!==$('model-path'))$('model-path').value=modelOverride||$('model-select').value;
  const modelValue=$('model-select').value;const opts=state.models.map(m=>`<option value="${esc(m)}">${bundled(m)?'内置多语言模型 · '+esc(m.split(/[\\/]/).at(-1)):'已有本地资源 · '+esc(m.split(/[\\/]/).at(-4)||'Whisper')}</option>`).join('');
  $('model-select').innerHTML=`<option value="">${state.models.some(bundled)?'使用内置多语言模型（无需下载）':'首次自动下载 small 多语言模型'}</option>`+opts+(modelOverride?`<option value="${esc(modelOverride)}">指定资源 · ${esc(modelOverride)}</option>`:'');
  $('model-select').value=modelOverride||modelValue||(state.models[0]||'');
@@ -187,8 +184,8 @@ $('cue-list').addEventListener('pointerover',e=>{if(!dragging||!(e.buttons&1))re
 document.addEventListener('pointerup',()=>dragging=null);
 document.addEventListener('change',e=>{if(e.target.dataset.outside){if(e.target.checked)outsideSelected.add(e.target.dataset.outside);else outsideSelected.delete(e.target.dataset.outside);}});
 $('cue-list').addEventListener('change',handle(async e=>{const id=e.target.dataset.check;if(id){e.target.checked?selected.add(id):selected.delete(id);anchorId=id;await activate(id);updateSelection();}}));
-document.addEventListener('keydown',handle(async e=>{if(e.target.closest('input,textarea,select')||$('modal').open)return;if(tab==='review'&&(e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){e.preventDefault();selected=new Set(visibleRows.map(c=>c.id));updateSelection();}if(tab==='review'&&e.key==='Delete'&&selected.size){e.preventDefault();await deleteSelected([...selected]);}}));
-document.addEventListener('keydown',handle(async e=>{if(tab!=='review'||e.code!=='Space'||e.ctrlKey||e.metaKey||e.altKey||$('modal').open||e.target.closest('input,textarea,select,[contenteditable="true"]'))return;e.preventDefault();if(e.repeat)return;await togglePlayback();}));
+document.addEventListener('keydown',handle(async e=>{if(e.target.closest('input,textarea,select')||$('modal').open||$('path-browser').open)return;if(tab==='review'&&(e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){e.preventDefault();selected=new Set(visibleRows.map(c=>c.id));updateSelection();}if(tab==='review'&&e.key==='Delete'&&selected.size){e.preventDefault();await deleteSelected([...selected]);}}));
+document.addEventListener('keydown',handle(async e=>{if(tab!=='review'||e.code!=='Space'||e.ctrlKey||e.metaKey||e.altKey||$('modal').open||$('path-browser').open||e.target.closest('input,textarea,select,[contenteditable="true"]'))return;e.preventDefault();if(e.repeat)return;await togglePlayback();}));
 async function togglePlayback(){const player=$('player');if(!player.paused){player.pause();return;}if(!cue(activeId))throw Error('请先选择字幕');if(!player.getAttribute('src')){await playActive();return;}if(playbackRange&&originalNow()>=playbackRange.end)player.currentTime=Math.max(0,(playbackRange.start-clipOffset)/1000);await player.play();}
 
 function mediaUrl(ep,extra=''){return `/api/media?token=${encodeURIComponent(TOKEN)}&project=${p().project_id}&episode=${encodeURIComponent(ep)}${extra}`;}
@@ -265,6 +262,8 @@ on('new-project',()=>projectDialog(true));on('home-create',()=>projectDialog(tru
 on('save-close',async()=>{await mutationQueue.catch(()=>{});await flush();releasePlayer();await request('close');resetProjectUI();await refresh();toast('项目已保存并关闭，待审状态保留');});
 on('manual-save',async()=>{await mutate('save');toast('项目进度已保存');});on('clear-cache',cleanCache);on('scan',scan);on('manual-pair',manualPair);
 on('choose-model',async()=>{const folder=await picker();if(folder){modelOverride=folder;renderMaterials();}});on('process-all',()=>processEpisodes(Object.keys(p().episodes)));on('pause-jobs',async()=>{await request('pause');await refresh();toast('任务已暂停，已完成分段保留');});
+on('model-select',()=>{const value=$('model-select').value;modelOverride=state.models.includes(value)?'':value;$('model-path').value=value;},'change');
+on('model-path',()=>{modelOverride=$('model-path').value.trim();renderMaterials();},'change');
 on('acceleration-reset',async()=>{await mutate('acceleration-reset');toast('已清除本机测速结果，下次需要识别时会重新检测；已有字幕和识别稿保持原样');});
 on('legacy-import',async()=>{const d=await showDialog('只读导入旧审核项目',`<p>仅可导入到空项目。会核对原基线指纹、读取旧字幕与识别证据，将进度映射到新稳定ID；旧目录不会修改。</p>${pathField('legacy-folder','旧项目目录')}${pathField('legacy-progress','旧审核进度 JSON','json')}`,'校验并导入');if(!d)return;const result=await mutate('legacy',{folder:d['legacy-folder'],progress:d['legacy-progress']});toast(`已导入 ${result.episodes} 集 / ${result.cues} 条，${result.pending} 条待审`);});
 document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',handle(async()=>{await flush();tab=b.dataset.tab;render();})));
@@ -278,12 +277,12 @@ on('set-start',()=>{$('edit-start').value=time(originalNow());queueDraft();});on
 document.querySelectorAll('[data-nudge]').forEach(b=>b.addEventListener('click',handle(async()=>{const [edge,delta]=b.dataset.nudge.split(':');const input=$('edit-'+edge);input.value=time(parseTime(input.value)+Number(delta));queueDraft();})));
 on('play-audio',()=>{const c=cue(activeId);if(c)loadMedia(c.episode,'audio',current(c).start_ms);});on('play-video',()=>{const c=cue(activeId);if(c)loadMedia(c.episode,'video',current(c).start_ms);});on('play-selection',playActive);on('loop-toggle',()=>{loop=!loop;$('loop-toggle').textContent=loop?'循环开':'循环关';$('loop-toggle').setAttribute('aria-pressed',String(loop));});
 on('export-ai-light',()=>exportPackage('ai'));on('export-ai-full',()=>exportPackage('ai',true));on('export-current',()=>exportPackage('current'));on('export-delivery',()=>exportPackage('delivery'));on('export-backup',()=>exportPackage('backup'));on('copy-prompt',async()=>{await navigator.clipboard.writeText($('handoff-prompt').value);toast('交接提示已复制');});
-on('import-opinions',async()=>{const path=await picker('json');if(!path)return;const r=await mutate('import',{path});editorId='';render();toast(r.duplicate?'该意见文件已导入，本次未重复处理':`已接收 ${r.accepted} 条意见；${r.conflicts} 项真实冲突；${r.tasks_open||0} 项额外待办；${r.scope_limits||0} 项范围说明（不计为逐条人工任务）`);});
+on('import-opinions',()=>window.localFiles.chooseOpinions());
 on('finish-close',async()=>{await mutationQueue.catch(()=>{});await flush();const d=await showDialog('完成并关闭项目','<p>要求待审事项已处理，并已导出当前修订的交付版。所有进度仍会保留；也可随时重新打开。</p>','完成并关闭');if(!d)return;releasePlayer();await request('close',{finished:true});resetProjectUI();await refresh();toast('项目已完成并保存');});
 document.addEventListener('click',handle(async e=>{
  const b=e.target.closest('button');if(!b)return;
  if(b.dataset.recent!==undefined){await flush();releasePlayer();await request('open',{folder:state.recent[+b.dataset.recent].path});resetProjectUI();await refresh();}
- if(b.dataset.reference){const path=await picker('reference');if(path){await mutate('reference',{path,kind:b.dataset.reference});toast('资料已导入');}}
+ if(b.dataset.reference)await window.localFiles.chooseReference(b.dataset.reference);
  if(b.dataset.retry)await processEpisodes([b.dataset.retry]);
  if(b.dataset.relink){const path=await picker('media');if(path){await mutate('relink',{episode:b.dataset.relink,path});toast('相同指纹素材已重新关联');}}
  if(b.dataset.episode){await flush();episode=b.dataset.episode;selected.clear();renderReview();}
@@ -299,5 +298,5 @@ document.addEventListener('click',handle(async e=>{
 on('merge-titles',async()=>{const plan=await mutate('merge-preview');const d=await showDialog('称谓与姓名合并预览',`<p>合并首条入点和后条出点，不移动后续时间、不剪媒体、不冒充人工通过。原始两个ID保留，可撤销。</p>${plan.candidates.map(c=>`<label><input type="checkbox" name="merge-${c.ids[0]}" ${c.eligible?'checked':'disabled'}> 第${c.episode}集 #${c.numbers.join(' + #')} → ${esc(c.text)} ${esc(c.reasons.join('；'))}</label>`).join('')||'<p>未发现可合并的独立称谓条。</p>'}`,'应用已勾选合并');if(!d)return;const ids=Object.entries(d).filter(([k,v])=>k.startsWith('merge-')&&v).map(([k])=>k.slice(6));if(!ids.length)return;const r=await mutate('merge-apply',{ids,token:plan.token});toast(`已合并 ${r.merged} 处；未改变原媒体和人工确认，可撤销`);});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)flush().catch(()=>{});});
 window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';flush().catch(()=>{});}});
-setInterval(async()=>{if(pollBusy||dirty||$('modal').open)return;pollBusy=true;try{await saving;const next=await request('state',null,'GET');const changed=next.project?.revision!==p()?.revision||next.processing!==state.processing;if(next.project?.project_id!==p()?.project_id||!setState(next))return;if(changed)render();else if(p()){renderMaterials();$('save-status').textContent=`已保存 · ${p().saved_at.slice(11,19)}`;await offerAIExport();}}catch(error){toast(error.message,true);}finally{pollBusy=false;}},6000);
+setInterval(async()=>{if(pollBusy||dirty||$('modal').open||picking)return;pollBusy=true;try{await saving;const next=await request('state',null,'GET');const changed=next.project?.revision!==p()?.revision||next.processing!==state.processing;if(next.project?.project_id!==p()?.project_id||!setState(next))return;if(changed)render();else if(p()){renderMaterials();$('save-status').textContent=`已保存 · ${p().saved_at.slice(11,19)}`;await offerAIExport();}}catch(error){toast(error.message,true);}finally{pollBusy=false;}},6000);
 refresh().catch(e=>toast(e.message,true));

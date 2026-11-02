@@ -31,6 +31,8 @@ class ReleasePackagingTests(unittest.TestCase):
         (self.root/'recent.json').write_text('{"private":true}')
         self.assertNotEqual(self.run_packager().returncode,0);self.assertFalse(list(self.out.glob('*.zip')) if self.out.exists() else [])
         (self.root/'recent.json').unlink()
+        profile=self.root/'.runtime/desktop-user-data';profile.mkdir();(profile/'Cookies').write_text('synthetic private profile')
+        self.assertNotEqual(self.run_packager().returncode,0);(profile/'Cookies').unlink();profile.rmdir()
         self.assertNotEqual(self.run_packager('--tag','../../outside').returncode,0)
     def test_asset_limit_fails_before_publication(self):
         spec=importlib.util.spec_from_file_location('release_packager',ROOT/'scripts/package_release.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)

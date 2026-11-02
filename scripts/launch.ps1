@@ -18,6 +18,10 @@ if (-not $pythonPath) {
     & (Join-Path $PSScriptRoot 'setup.ps1')
     $pythonPath = $embeddedPython
 }
+# Desktop mode supplies real Explorer/UNC drag paths. Browser mode stays available.
+$desktopExe = Join-Path $appDir '.runtime/desktop/electron.exe'
+if (-not (Test-Path -LiteralPath $desktopExe)) { $desktopExe = Join-Path $appDir 'node_modules/electron/dist/electron.exe' }
+$useDesktop = (-not $NoBrowser) -and (Test-Path -LiteralPath $desktopExe) -and (Test-Path -LiteralPath (Join-Path $appDir 'desktop/main.cjs'))
 # Reuse only our own live server, identified by its PID and local address.
 $serverFile = Join-Path $appDir '.runtime\server.json'
 if (Test-Path -LiteralPath $serverFile) {
@@ -26,7 +30,11 @@ if (Test-Path -LiteralPath $serverFile) {
         $serverProcess = Get-Process -Id $serverInfo.pid -ErrorAction Stop
         if ($serverProcess.ProcessName -like 'python*' -and $serverInfo.url -match '^http://127\.0\.0\.1:\d+/$') {
             $response = Invoke-WebRequest -Uri $serverInfo.url -UseBasicParsing -TimeoutSec 2
-            if ($response.Content -match 'LOCAL REVIEW STUDIO') { if (-not $NoBrowser) { Start-Process $serverInfo.url }; exit 0 }
+            if ($response.Content -match 'LOCAL REVIEW STUDIO') {
+                if ($useDesktop) { $env:SUBTITLE_PYTHON=$pythonPath; $env:SUBTITLE_APP_ROOT=$appDir; & $desktopExe (Join-Path $appDir 'desktop') }
+                elseif (-not $NoBrowser) { Start-Process $serverInfo.url }
+                exit 0
+            }
         }
     } catch { }
 }
@@ -41,5 +49,8 @@ if ($isPortable) {
     if (-not $bundledModel) { throw '便携识别模型缺失，请重新完整解压压缩包；未尝试联网下载。' }
 }
 Write-Host '字幕审查正在本机运行。请保留此窗口；结束时先在页面保存并关闭项目，再关闭此窗口。' -ForegroundColor Green
-if ($NoBrowser) { & $pythonPath -m app.server --no-browser } else { & $pythonPath -m app.server }
+if ($useDesktop) {
+    $env:SUBTITLE_PYTHON=$pythonPath; $env:SUBTITLE_APP_ROOT=$appDir
+    & $desktopExe (Join-Path $appDir 'desktop')
+} elseif ($NoBrowser) { & $pythonPath -m app.server --no-browser } else { & $pythonPath -m app.server }
 exit $LASTEXITCODE

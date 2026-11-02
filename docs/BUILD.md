@@ -12,7 +12,16 @@ python -c "from faster_whisper.utils import download_model; print(download_model
 
 也可以使用已有的 `large-v3-turbo` CTranslate2 模型目录，必须包含 `model.bin`、`config.json`、`tokenizer.json`、`vocabulary.json` 和 `preprocessor_config.json`。
 
-## 2. 可选准备 GPU 组件
+## 2. 准备桌面运行组件
+
+```powershell
+npm ci --ignore-scripts
+python scripts/prepare_desktop.py
+```
+
+使用官方Electron Windows组件，并验证官方SHA-256。构建会复制到便携包的`.runtime/desktop`，不会要求使用者安装Node.js。桌面窗口只加载本机页面，页面不开放Node权限，通过有限桥接读取用户拖入文件的真实路径。
+
+## 3. 可选准备 GPU 组件
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_gpu.ps1
@@ -20,7 +29,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_gpu.ps1
 
 脚本从 NVIDIA 在 PyPI 发布的 Windows 软件包准备应用本地运行库，固定版本见 `requirements-gpu.txt`。它们需要符合各自的再发行条款，许可证及来源信息随包保留。已有 GPU 目录时脚本会提示保留原组件，避免混装不同版本。
 
-## 3. 构建独立目录
+## 4. 构建独立目录
 
 从 Visual Studio 的 `VC/Redist/MSVC/<版本>/x64` 目录选择 CRT 和 OpenMP 可再发行组件；不要从另一种架构或普通系统目录随意拷 DLL。
 
@@ -35,7 +44,7 @@ python scripts/build_portable.py `
 
 只有构建产物会写到指定输出目录，不读取业务项目、最近项目或个人测速配置。
 
-## 4. 验收并封包
+## 5. 验收并封包
 
 建议把目录复制到新的中文/空格路径，用包内 Python 验证依赖、音频转换、离线模型推理、项目保存重开和页面启动。CPU/GPU 实机测试需要自己的合法音频样本；不要使用业务项目作为构建输入。
 
