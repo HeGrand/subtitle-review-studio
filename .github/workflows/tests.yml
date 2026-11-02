@@ -33,7 +33,6 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
-      REVIEW_TEST_ROOT: ${{ runner.temp }}/subtitle-desktop-tests
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,6 +46,7 @@ jobs:
       - run: python scripts/prepare_desktop.py
       - shell: pwsh
         run: |
+          $env:REVIEW_TEST_ROOT = Join-Path $env:RUNNER_TEMP 'subtitle-desktop-tests'
           New-Item -ItemType Directory -Path $env:REVIEW_TEST_ROOT -Force | Out-Null
           $env:REVIEW_BROWSER_PATH = (Get-Command chrome -ErrorAction SilentlyContinue).Source
           if (-not $env:REVIEW_BROWSER_PATH) { $env:REVIEW_BROWSER_PATH = 'C:/Program Files/Google/Chrome/Application/chrome.exe' }
