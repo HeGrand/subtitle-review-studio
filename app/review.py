@@ -14,12 +14,20 @@ def valid_review(c):
     return r if r.get('snapshot_hash') == digest(c['accepted']) else {}
 
 
+def api_review_reason(c):
+    review = c.get('api_review', {})
+    return review.get('reason') if review.get('snapshot_hash') == digest(c['accepted']) else None
+
+
 def issue_pending(i):
-    return not i.get('resolved') and i.get('triage', {}).get('result') != 'dismissed'
+    return not i.get('resolved') and (
+        i.get('script_only_extra') or i.get('triage', {}).get('result') != 'dismissed'
+    )
 
 
 def issue_in_scope(data,issue):
-    return bool(issue.get('cue_id')) or data.get('review_scope','existing_subtitles')!='existing_subtitles'
+    return (bool(issue.get('cue_id')) or data.get('review_scope','existing_subtitles')!='existing_subtitles'
+            or data.get('mode') == 'generation' and issue.get('script_only_extra', False))
 
 
 def task_in_scope(data,task):
@@ -34,20 +42,50 @@ def human_reasons(c,data):
     reasons=[];related=set(c.get('merged_ids') or [c['id']])
     if c.get('draft'):reasons.append('本条有尚未确认的人工草稿')
     if c.get('manual_hold'):reasons.append('本条被明确恢复为待人工审核')
-    if c.get('note'):reasons.append('本条有人工备注：'+c['note'])
-    reasons.extend(t.get('reason','具体任务待处理') for t in data.get('review_tasks',[]) if not t.get('resolved') and related & set(t.get('related_stable_ids',[])))
+    if c.get('note'):
+        for note in c['note'].split('；'):
+            if note.startswith('检测到人声起点') or note.startswith('连续人声'):
+                reasons.append('本地音频检测：'+note)
+            elif note.startswith(('识别', '实说内容', '此处按文稿', '文稿只匹配', '部分字边界', '台词存在重复')):
+                reasons.append('本地识别 / 文稿匹配：'+note)
+            else:
+                reasons.append('本条备注：'+note)
+    if c.get('script_coverage') and not any('部分词' in reason for reason in reasons):
+        reasons.append('文稿只匹配到部分词，请试听核对是否漏词。')
+    if onset := data.get('_early_onset', {}).get(c['id']):reasons.append(onset)
+    if c['id'] in data.get('_deleted_prefixes', {}):
+        reasons.append('疑似漏句首：前一小段已删除，本条只对上剧本后半句。请连同前一段原声试听。')
+    if c['id'] in data.get('_overlap_ids', ()):
+        reasons.append('本条时间与相邻字幕重叠，请调整入点或出点。')
+    if api_review_reason(c):reasons.append('AI 文字复查：'+api_review_reason(c))
+    reasons.extend(('外部 AI 意见：' if t.get('bundle_id') else '') + t.get('reason','具体任务待处理')
+                   for t in data.get('review_tasks',[]) if not t.get('resolved') and related & set(t.get('related_stable_ids',[])))
     r=valid_review(c)
-    if r.get('result')=='human' and c['opinions']:reasons.append(c['opinions'][-1].get('reason','具体文字疑点'))
-    reasons.extend(i.get('triage',{}).get('reason') or i.get('message','具体初查疑点') for i in data['issues'] if i.get('cue_id') in related and issue_pending(i) and i.get('triage',{}).get('result')=='retained')
+    if r.get('result')=='human' and c['opinions']:reasons.append('外部 AI 意见：'+c['opinions'][-1].get('reason','具体文字疑点'))
+    reasons.extend(('外部 AI 意见：' if i.get('triage',{}).get('bundle_id') else '本地初查：') +
+                   (i.get('triage',{}).get('reason') or i.get('message','具体初查疑点')) for i in data['issues'] if i.get('cue_id') in related and issue_pending(i) and i.get('triage',{}).get('result')=='retained')
     return list(dict.fromkeys(reasons))
 
 
 def category(c, data):
-    if c['status'] == 'approved':
+    related = set(c.get('merged_ids') or [c['id']])
+    retained = any(i.get('cue_id') in related and issue_pending(i)
+                   and i.get('triage', {}).get('result') == 'retained' for i in data['issues'])
+    new_evidence = any(not t.get('resolved') and t.get('new_evidence_after_human')
+                       and related.intersection(t.get('related_stable_ids', []))
+                       for t in data.get('review_tasks', []))
+    if retained or new_evidence:
+        return 'draft' if c.get('draft') else 'human'
+    if c['status'] == 'approved' and (c['accepted']['deleted'] or (
+            c['id'] not in data.get('_deleted_prefixes', {}) and c['id'] not in data.get('_overlap_ids', ()))):
         return 'approved'
     if c.get('draft'):
         return 'draft'
-    if c.get('manual_hold') or c.get('note'):
+    if (c.get('manual_hold') or c.get('note') or c.get('script_coverage') or c.get('time_adjustments')
+            or c['id'] in data.get('_early_onset', {}) or c['id'] in data.get('_deleted_prefixes', {})
+            or c['id'] in data.get('_overlap_ids', ())):
+        return 'human'
+    if api_review_reason(c):
         return 'human'
     if c.get('merged_into'):
         return 'merged'  # Layout tombstone; its live parent still requires review.
@@ -56,15 +94,32 @@ def category(c, data):
     tasks = [t for t in data.get('review_tasks', []) if not t.get('resolved') and related & set(t.get('related_stable_ids', []))]
     if tasks or r.get('result') == 'human':
         return 'term' if c['id'] in data.get('_term_routes',{}) and not tasks else 'human'
-    if any(i.get('cue_id') in related and issue_pending(i) and i.get('triage',{}).get('result') == 'retained' for i in data['issues']):
-        return 'human'
     if r.get('result') == 'correction':
         return 'correction'
-    if r.get('result') in ('clear', 'correction_applied'):
+    api = c.get('api_review', {})
+    api_clear = api.get('result') == 'clear' and api.get('snapshot_hash') == digest(c['accepted'])
+    if r.get('result') in ('clear', 'correction_applied') or api_clear:
         if any(i.get('cue_id') in related and issue_pending(i) for i in data['issues']):
             return 'candidate'
-        return 'ai_corrected' if r['result'] == 'correction_applied' else 'text_clear'
+        return 'ai_corrected' if r.get('result') == 'correction_applied' else 'text_clear'
     return 'incomplete'
+
+
+def overlap_ids(cues, row_for):
+    by_episode = {}
+    for cue in cues:
+        row = row_for(cue)
+        if not row['deleted']:
+            by_episode.setdefault(cue['episode'], []).append((row['start_ms'], row['end_ms'], cue['id']))
+    result = set()
+    for rows in by_episode.values():
+        edge, owner = -1, None
+        for start, end, cid in sorted(rows):
+            if start < edge:
+                result.update((owner, cid))
+            if end > edge:
+                edge, owner = end, cid
+    return result
 
 
 def classify_remaining(data, item, bundle_id=''):
@@ -102,6 +157,29 @@ def add_remaining(data, item, bundle_id=''):
         records.append(record)
 
 
+def add_post_approval_evidence(data, cue, opinion):
+    item = {'kind': 'human', 'episode': cue['episode'], 'related_stable_ids': [cue['id']],
+            'start_ms': opinion['start_ms'], 'end_ms': opinion['end_ms'], 'reason': opinion['reason'],
+            'evidence': opinion['evidence'], 'new_evidence_after_human': True}
+    add_remaining(data, item, opinion.get('bundle_id', ''))
+    _, record = classify_remaining(data, item)
+    for task in data.get('review_tasks', []):
+        if task['id'] == record.get('id') and not task.get('new_evidence_after_human'):
+            task['new_evidence_after_human'] = True
+            if task.get('superseded') or task.get('resolution', '').startswith('已有人工确认覆盖该项'):
+                task.update(resolved=False, superseded=False, resolution='')
+
+
+def restore_post_approval_evidence(data):
+    if data.get('post_approval_evidence_version') == 1:
+        return
+    for cue in data['cues']:
+        for opinion in cue.get('opinions', []):
+            if opinion.get('new_evidence_after_human') is True and opinion.get('text_review', {}).get('result') == 'human':
+                add_post_approval_evidence(data, cue, opinion)
+    data['post_approval_evidence_version'] = 1
+
+
 def migrate(data):
     if data.get('review_migration_version') == 1:
         return False
@@ -132,9 +210,12 @@ def accept_assessment(project, c, opinion):
         return
     c['text_review'] = {**copy.deepcopy(assessment), 'snapshot_hash': digest(c['accepted']),
                         'opinion_id': opinion['opinion_id'], 'bundle_id': opinion['bundle_id'], 'at': now()}
+    if assessment.get('result') == 'incomplete':
+        return
     # Supersede old generic/observation tasks only with an explicit, evidence-backed new assessment.
     for task in project.data.get('review_tasks', []):
-        if c['id'] in task.get('related_stable_ids', []) and task.get('kind') != 'incomplete':
+        if (c['id'] in task.get('related_stable_ids', []) and task.get('kind') != 'incomplete'
+                and not task.get('new_evidence_after_human')):
             task.update(superseded=True, resolved=True, resolution='由新的逐条文字审查结果取代，原记录保留')
 
 

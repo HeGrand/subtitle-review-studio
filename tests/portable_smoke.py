@@ -21,7 +21,7 @@ source=work/'test.wav'
 with wave.open(str(source),'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b'\0\0'*16000*3)
 mono=work/'mono.wav'
 subprocess.run([ffmpeg,'-y','-i',str(source),'-ar','16000','-ac','1',str(mono)],check=True,capture_output=True)
-env=dict(os.environ,HF_HUB_OFFLINE='1',HF_HUB_DISABLE_TELEMETRY='1',PYTHONNOUSERSITE='1')
+env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1',HF_HUB_OFFLINE='1',HF_HUB_DISABLE_TELEMETRY='1',PYTHONNOUSERSITE='1')
 subprocess.run([sys.executable,'-m','app.worker','--audio',str(mono),'--output',str(work/'transcript.json'),'--model',models[0],'--cache',str(work/'empty-cache')],env=env,check=True,timeout=180,capture_output=True)
 assert (work/'transcript.json').exists()
 srt=work/'01.srt';srt.write_text('1\n00:00:00,000 --> 00:00:01,000\nHello.\n',encoding='utf-8')
@@ -29,7 +29,7 @@ folder=work/'project';folder.mkdir();project=Project.create(folder,'便携验收
 project.import_pairs([{'episode':'01','srt':str(srt)}]);project.close()
 project=Project.open(folder);assert project.data['cues'][0]['accepted']['text']=='Hello.';project.close()
 log=(work/'server.log').open('w',encoding='utf-8')
-server=subprocess.Popen([str(Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'),'-NoProfile','-ExecutionPolicy','Bypass','-File',str(root/'scripts/launch.ps1'),'-NoBrowser'],cwd=root,env=env,stdout=log,stderr=log)
+server=subprocess.Popen([sys.executable,'-m','app.server','--no-browser'],cwd=root,env=env,stdout=log,stderr=log)
 try:
     for _ in range(300):
         time.sleep(.1)

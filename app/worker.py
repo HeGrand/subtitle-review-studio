@@ -14,6 +14,8 @@ def main():
     for name in ('audio', 'output', 'model', 'cache', 'download-model'):
         parser.add_argument('--' + name, default='')
     parser.add_argument('--device',choices=('cpu','cuda'),default='cpu')
+    parser.add_argument('--language',choices=('en','zh','auto'),default='auto')
+    parser.add_argument('--review-windows')
     args = parser.parse_args()
     os.environ['HF_HOME'] = str(Path(args.cache).resolve())
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
@@ -49,6 +51,25 @@ def main():
         duration = w.getnframes() / w.getframerate()
         rate = w.getframerate()
     import numpy as np
+    if args.review_windows:
+        results = {}
+        with wave.open(args.audio, 'rb') as audio:
+            for window in read_json(args.review_windows):
+                start, end = window['start_ms'], window['end_ms']
+                audio.setpos(round(start * rate / 1000))
+                samples = np.frombuffer(audio.readframes(round((end - start) * rate / 1000)),
+                                        dtype=np.int16).astype(np.float32) / 32768
+                segments, _ = model.transcribe(samples, language=None if args.language == 'auto' else args.language,
+                                               beam_size=5, word_timestamps=True, vad_filter=False,
+                                               condition_on_previous_text=False)
+                words = [word for segment in segments for word in segment.words or []]
+                if words:
+                    results[str(window['index'])] = {'text': ''.join(w.word for w in words).strip(),
+                                                     'start_ms': start + round(words[0].start * 1000),
+                                                     'end_ms': min(end, start + round(words[-1].end * 1000)),
+                                                     'edge_limited': words[0].start < .06}
+        atomic_json(output, results)
+        return
     segments, languages = [], []
     chunks = output.parent / 'chunks'
     chunks.mkdir(exist_ok=True)
@@ -65,7 +86,7 @@ def main():
             with wave.open(args.audio, 'rb') as w:
                 w.setpos(start * rate)
                 audio = np.frombuffer(w.readframes(round((end - start) * rate)), dtype=np.int16).astype(np.float32) / 32768
-            iterator, info = model.transcribe(audio, language=None, beam_size=5, word_timestamps=True,
+            iterator, info = model.transcribe(audio, language=None if args.language=='auto' else args.language, beam_size=5, word_timestamps=True,
                                               vad_filter=False, condition_on_previous_text=False)
             new_chunks+=1
             chunk = {'start': start, 'end': end, 'language': info.language,'device':args.device,

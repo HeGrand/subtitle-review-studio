@@ -1,6 +1,6 @@
 {
   "name": "subtitle-review-studio",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Browser regression checks for the local subtitle review workbench",
   "scripts": {

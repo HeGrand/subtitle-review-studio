@@ -14,7 +14,7 @@ def main():
     assert json.loads((root/'portable.json').read_text(encoding='utf-8'))['offline']
     assert not archive.is_relative_to(root),'ZIP must be outside the portable folder'
     files=[p for p in root.rglob('*') if p.is_file()]
-    forbidden={'project.json','recent.json','server.json','acceleration.json','.subtitle-review.lock','.env'}
+    forbidden={'project.json','recent.json','server.json','acceleration.json','ai-config.json','.subtitle-review.lock','.env'}
     assert not [str(p) for p in files if p.name in forbidden or p.is_symlink() or 'desktop-user-data' in p.parts or '__pycache__' in p.parts or p.suffix=='.pyc'],'Portable folder contains runtime state, cached bytecode, or links'
     versions={d.metadata['Name']:d.version for d in importlib.metadata.distributions(path=[str(root/'.runtime/deps')])}
     (root/'第三方组件版本.json').write_text(json.dumps(versions,ensure_ascii=False,indent=2),encoding='utf-8')

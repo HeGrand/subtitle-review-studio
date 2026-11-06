@@ -81,6 +81,17 @@ def export_srt(project, folder, episodes=None, delivery=False):
     if errors:
         raise UserError('导出检查未通过：\n' + '\n'.join(errors[:60]))
     dest = make_output(folder, ('交付字幕' if delivery else '当前字幕') + f'_v{project.data["version"]}')
+    export_record = {'type': 'delivery' if delivery else 'srt', 'at': now(),
+                     'path': str(dest), 'revision': project.data['revision'], 'episodes': episodes}
+    if project.data.get('mode') == 'generation':
+        files = []
+        for ep in episodes:
+            target = dest / (ep + '.srt')
+            write_text(target, project.srt_text(ep)[0])
+            files.append(str(target))
+        project.data['exports'].append(export_record)
+        project.save()
+        return {'directory': str(dest), 'files': files, 'episodes': len(files)}
     mapping = {}
     for ep in episodes:
         text, mapping[ep] = project.srt_text(ep)
@@ -102,7 +113,7 @@ def export_srt(project, folder, episodes=None, delivery=False):
     write_text(dest / 'README.md', '# 字幕导出\n\nUTF-8 SRT；仅包含已通过/已确定的基线，未确认草稿保留在项目内。删除后重编号，原媒体不裁剪、不整体移动。\n\n' +
                ('交付检查通过。人工确认、文字审查未见具体问题和AI确定修正分开记录；实际声音范围见审查范围与结果.json。' if delivery else '这是当前可用字幕，项目可能仍有待审项。') + '\n')
     archive = package_zip(dest)
-    project.data['exports'].append({'type': 'delivery' if delivery else 'srt', 'at': now(), 'path': str(dest), 'revision': project.data['revision']})
+    project.data['exports'].append(export_record)
     project.save()
     return {'directory': str(dest), 'zip': str(archive), 'episodes': len(episodes)}
 
@@ -110,6 +121,8 @@ def export_srt(project, folder, episodes=None, delivery=False):
 def export_ai(project, folder, full=False):
     if not project.data['episodes']:
         raise UserError('请先导入字幕。')
+    if any(not e.get('original_srt') for e in project.data['episodes'].values()):
+        raise UserError('还有集数未生成字幕，请先生成后再导出交接包。')
     dest = make_output(folder, 'AI完整音频包' if full else 'AI文字与疑点音频包')
     bundle_id = uuid.uuid4().hex
     entries, episode_index, missing, evidence_paths = [], [], [], []
@@ -134,6 +147,7 @@ def export_ai(project, folder, full=False):
                                'original_srt': original, 'current_srt': current,
                                'transcript': transcript if transcript_ok else None, 'full_audio': audio if audio_ok else None,
                                'local_status': e['local_status'], 'local_job': project.data['jobs'].get(ep, {}),
+                               'generation_language': e.get('generation_language'),
                                'source_fingerprints': {'srt': e['srt_fingerprint'], 'media': e.get('media_fingerprint')}})
     for c in project.data['cues']:
         row = c['accepted']
@@ -141,8 +155,10 @@ def export_ai(project, folder, full=False):
                         'original': row['text'], 'start_ms': row['start_ms'], 'end_ms': row['end_ms'],
                         'deleted': row['deleted'], 'snapshot_hash': digest(row), 'raw_original': c['original'],
                         'human_status': c['status'], 'human_note': c['note'], 'unconfirmed_draft': c.get('draft'), 'term_policy': c.get('term_policy'),
-                        'previous_opinions': c['opinions'], 'text_review':c.get('text_review'),
-                        'merged_ids':c.get('merged_ids'), 'merged_into':c.get('merged_into')})
+                        'previous_opinions': c['opinions'], 'text_review':c.get('text_review'), 'api_review': c.get('api_review'),
+                        'merged_ids':c.get('merged_ids'), 'merged_into':c.get('merged_into'),
+                        'generation_source': c.get('generation_source'), 'script_locator': c.get('script_locator'),
+                        'script_coverage': c.get('script_coverage'), 'time_adjustments': c.get('time_adjustments', [])})
     issues = copy.deepcopy(project.data['issues'])
     from .review import issue_in_scope,task_in_scope
     for i in issues:
@@ -161,6 +177,16 @@ def export_ai(project, folder, full=False):
                 evidence_paths.append(r[k])
     if not refs:
         missing.append('未提供剧本、人物名表或术语表；不得编造正式台词或姓名')
+    from .script_context import annotate_entries, comparison_markdown
+    generation_lines = project.data.get('generation', {}).get('lines', []) if project.data.get('mode') == 'generation' else None
+    annotate_entries(dest, refs, {e['episode']: e for e in episode_index}, entries, generation_lines)
+    write_text(dest / '逐条台词对照.md', comparison_markdown(entries))
+    evidence_paths.append('逐条台词对照.md')
+    entry_by_id = {e['stable_id']: e for e in entries}
+    for issue in issues:
+        entry = entry_by_id.get(issue.get('cue_id'))
+        if entry:
+            issue['script_context'] = {k: entry[k] for k in ('script_status', 'script_text', 'script_excerpt', 'script_source', 'asr_text')}
     scope = '含已成功提取的完整分集音频和已知疑点片段；缺失项仍须记录无法核对。' if full else '仅有文字与已知疑点片段；未提供完整音轨，不能宣称整集对白/漏句/中文检测已核对通过。'
     header = {'schema': 1, 'project_id': project.data['project_id'], 'project_version': project.data['version'],
               'source_fingerprint': project.source_fingerprint(), 'bundle_id': bundle_id, 'created_at': now(), 'scope': scope}
@@ -196,9 +222,9 @@ def export_ai(project, folder, full=False):
                             'text_review': {'performed':True, 'result':'incomplete',
                                             'method':'示例：只完成字幕阅读，识别与剧本对照尚未执行',
                                             'support':[{'type':'context','path':episode_index[0]['current_srt'],'quote':first['original']}]},
-                            'review_summary': {'problem': '示例：文字对照尚未执行完毕', 'script_text': '', 'asr_text': '',
+                            'review_summary': {'problem': '示例：文字对照尚未执行完毕', 'script_text': first.get('script_text', ''), 'asr_text': first.get('asr_text', ''),
                                                'recommendation': '继续核对识别稿与剧本，不把未执行工作标成已审', 'uncertainty': '尚未执行的文字工作',
-                                               'script_status': 'not_located'},
+                                               'script_status': first.get('script_status', 'not_located')},
                             'confidence': 'low', 'needs_human': True, 'chinese_audio': False, 'audio_checked': False,
                             'evidence': [{'path': episode_index[0]['current_srt'], 'detail': '仅阅读字幕，未核对声音'}]}]
     example['coverage'] = [{'episode': first['episode'], 'scope': '示例：仅阅读字幕，文字对照未执行', 'audio_checked': False, 'result': '不能据此声称已完成文字审查'}]
@@ -209,6 +235,7 @@ def export_ai(project, folder, full=False):
                '\n'.join(f'- 第{e["episode"]}集：原字幕 `{e["original_srt"]}`；当前 `{e["current_srt"]}`；识别 `{e["transcript"]}`；完整音频 `{e["full_audio"]}`' for e in episode_index) +
                '\n\n可用资料：\n' + '\n'.join(f'- {r["kind"]}：{r["name"]} → `{r["text_file"]}`；{r["warning"]}' for r in refs) +
                '\n\n缺失项：\n' + '\n'.join('- ' + s for s in missing) + '\n')
+    generation_notice = '本项目由剧本和成片生成字幕；既要核对已有字幕，也要核对识别差异与疑似遗漏。无字幕片段不能套用已有字幕模式的范围外规则。' if project.data.get('mode') == 'generation' else '本项目仅审查字幕文件中已有条目。不要求发现或补写字幕文件之外的对白；in_scope=false的无字幕识别片段只作范围外记录，不创建必做人工任务，也不阻断交付。'
     write_text(dest / 'README_先读我.md', f'''# 接手AI：现在开始执行字幕审查
 
 你要执行本项目的字幕审查；先读取本文件和AI审查规则，再按任务清单执行，按模板返回意见文件。
@@ -217,12 +244,13 @@ def export_ai(project, folder, full=False):
 
 项目：{project.data['name']}。版本：{project.data['version']}。当前阶段：本地识别/规则初查与人工确认见索引，等待你执行外部AI语义审查；不能把本地初查当成AI已完成。
 
-**本项目仅审查字幕文件中已有条目。不要求发现或补写字幕文件之外的对白；in_scope=false的无字幕识别片段只作范围外记录，不创建必做人工任务，也不阻断交付。素材配对、已有字幕局部时间错位等影响现有字幕的问题仍须处理。重复术语/称谓疑点请用term_review={{canonical:剧本正式写法,observed:本条写法,sense:具体含义}}逐条标注，按完整术语汇总为集中确认，不把King和Kingdom混为一组；由用户决定采用剧本还是指定音频写法，保留所有人工进度。**
+**{generation_notice}素材配对、已有字幕局部时间错位等影响现有字幕的问题仍须处理。重复术语/称谓疑点请用term_review={{canonical:剧本正式写法,observed:本条写法,sense:具体含义}}逐条标注，按完整术语汇总为集中确认，不把King和Kingdom混为一组；由用户决定采用剧本还是指定音频写法，保留所有人工进度。**
 
 ## 执行顺序
 
 1. 完整阅读 `AI审查规则.md` 与 `任务与材料索引.md`，再读取 `项目与字幕索引.json`。
 2. 按 episodes 索引读取原始字幕、当前字幕、时间戳识别稿、资料与音频。资料原件位于 originals，提取文本也已提供。全部路径相对本包，不依赖原电脑。
+   先读 `逐条台词对照.md` 查看每条对应的原剧本完整台词、本条原文片段、当前字幕、词级识别和出处；entries 中也有 script_text、script_excerpt、script_source、script_status、asr_text。文字定位只是资料引用，不能当成实际声音已核验；未定位不能判成无台词。
 3. 逐条审查 entries，结合上下文和 issues 已知疑点。字幕取舍以实际声音、小偏差用剧本、大偏差用实际对白；具体规则见规则文件。
 4. 审阅 `修改及确认历史.json` 和条目中的 human_status、human_note。已通过修订不能被静默推翻，unconfirmed_draft 是尚未批准的草稿，不是当前字幕。
 5. 从 `AI审查意见_填写模板.json` 复制顶层标识；按 `输出示例_不可直接当真实意见.json` 的结构写真实意见。不要把示例意见当成已执行审查。
@@ -253,7 +281,7 @@ def export_ai(project, folder, full=False):
 
 
 def import_opinions(project, data):
-    from .review import migrate, add_remaining, accept_assessment, reconcile_human_tasks
+    from .review import migrate, add_remaining, accept_assessment, reconcile_human_tasks, add_post_approval_evidence
     migrate(project.data)
     if 'state' in data:
         return project.update_legacy_progress(data)
@@ -348,9 +376,7 @@ def import_opinions(project, data):
         accept_assessment(project, c, c['opinions'][-1])
         # Human confirmation is preserved. New concrete observations are review tasks, not import failures.
         if c['status'] == 'approved' and opinion.get('new_evidence_after_human') is True and opinion.get('text_review', {}).get('result') == 'human':
-            add_remaining(project.data, {'kind':'human','episode':c['episode'],'related_stable_ids':[c['id']],
-                          'start_ms':opinion['start_ms'],'end_ms':opinion['end_ms'],'reason':opinion['reason'],
-                          'evidence':opinion['evidence']}, data['bundle_id'])
+            add_post_approval_evidence(project.data, c, c['opinions'][-1])
         accepted_count += 1
     for item in conflicts:
         item.update(id=uuid.uuid4().hex, at=now(), resolved=False)

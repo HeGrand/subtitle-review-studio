@@ -7,6 +7,11 @@ const prepared=spawnSync(process.env.REVIEW_PYTHON||'python',['-c',fixture,base]
  try{
  electron=await _electron.launch({executablePath:path.join(source,'node_modules/electron/dist/electron.exe'),args:[path.join(source,'desktop')],env:{...process.env,SUBTITLE_APP_ROOT:runtime,SUBTITLE_PYTHON:process.env.REVIEW_PYTHON||'python',SUBTITLE_TEST_HIDDEN:'1',PYTHONUTF8:'1',PYTHONDONTWRITEBYTECODE:'1'},timeout:60000});
  const page=await electron.firstWindow();const errors=[];page.on('pageerror',error=>errors.push(error.message));await page.waitForSelector('#home:not([hidden])');
+ const nativeMenuState=()=>electron.evaluate(({BrowserWindow,Menu})=>({
+  installed:Menu.getApplicationMenu()!==null,visible:BrowserWindow.getAllWindows()[0].isMenuBarVisible()
+ }));
+ await page.keyboard.press('Alt');
+ assert.deepEqual(await nativeMenuState(),{installed:false,visible:false});
  assert.equal(await page.evaluate(()=>typeof require),'undefined');assert.equal(await page.evaluate(()=>typeof window.subtitleDesktop.filePath),'function');
  await page.click('#home-open');await page.fill('#project-folder',path.join(base,'project'));await page.click('#modal-ok');await page.waitForSelector('#workspace:not([hidden])');
  const humanBefore=await page.evaluate(()=>({accepted:p().cues[0].accepted,status:p().cues[0].status,note:p().cues[0].note}));
@@ -20,7 +25,7 @@ const prepared=spawnSync(process.env.REVIEW_PYTHON||'python',['-c',fixture,base]
   await page.click('[data-pick="media-dir"]');await page.waitForFunction(value=>document.getElementById('browser-selected').textContent===value,shared);await page.click('#browser-confirm');uncTested=true;
  }
  await drop('#reference-drop',path.join(base,'剧本 新版.docx'));await page.waitForFunction(()=>document.getElementById('reference-source').textContent.includes('剧本 新版.docx'));assert.match(await page.locator('#reference-source').innerText(),new RegExp(base.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
- await page.click('[data-tab="exchange"]');await drop('#opinion-drop',path.join(base,'AI意见.json'));await page.waitForFunction(()=>document.getElementById('opinion-source').textContent.includes('AI意见.json'));assert((await page.locator('#opinion-source').innerText()).includes(base));
+ await page.click('[data-tab="exchange"]');await page.locator('#export-more > summary').click();await drop('#opinion-drop',path.join(base,'AI意见.json'));await page.waitForFunction(()=>document.getElementById('opinion-source').textContent.includes('AI意见.json'));assert((await page.locator('#opinion-source').innerText()).includes(base));
  assert.deepEqual(await page.evaluate(()=>({accepted:p().cues[0].accepted,status:p().cues[0].status,note:p().cues[0].note})),humanBefore);
  await page.click('[data-tab="review"]');await page.selectOption('#filter-status','all');await page.locator('.cue-row').last().click();await page.fill('#edit-note','关闭前的新备注');
  assert.deepEqual(errors,[]);await page.screenshot({path:path.join(base,'桌面拖放.png'),fullPage:true});

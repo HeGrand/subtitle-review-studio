@@ -23,7 +23,28 @@ for i in range(2):
  term['opinions']=[{'reason':'术语正式拼写差异','term_review':{'canonical':'Starlight King'},'review_summary':{'script_text':'Starlight King'}}]
  p.data['cues'].append(term)
 p.save();p.close()
+(root/'generated').mkdir()
+generated = Project.create(root/'generated', '生成字幕合并验收')
+generated.import_pairs([{'episode': '01', 'srt': str(srt)}])
+generated.data['mode'] = 'generation'
+import shutil
+shutil.copyfile(audio, root/'generated'/'evidence'/'audio.wav')
+generated.data['episodes']['01'].update(audio='evidence/audio.wav', duration_ms=10000)
+generated.save()
+generated.close()
+from app import onset
+onset.speech_regions = lambda path: [(360, 690), (1000, 1600)]
 from app.server import Handler,STATE,ThreadingHTTPServer
+import json
+from app import ai_config
+def fake_ai(messages, **kwargs):
+    rows = json.loads(messages[-1]['content'])
+    assert all(row['subtitle'] != 'Hello.' for row in rows)
+    return json.dumps({'findings': [{'id': row['id'], 'reason': '检查句尾标点', 'text': 'Goodbye!'}
+                                    for row in rows if row['subtitle'] == 'Goodbye.']})
+ai_config.chat = fake_ai
+ai_config.CONFIG = root/'ai-config.json'
+ai_config.save_config({'base_url': 'http://localhost:19999/v1', 'model': 'fixture-model'})
 STATE.recent_path=root/'recent.json'
 server=ThreadingHTTPServer(('127.0.0.1',0),Handler);STATE.port=server.server_address[1]
 print('http://127.0.0.1:'+str(STATE.port)+'/',flush=True)

@@ -82,9 +82,15 @@ def plan(project):
 
 
 def context(project):
+    from .core import proposed
+    from .onset import early_onset_reasons
+    from .review import overlap_ids
+    from .script_context import deleted_prefixes
     result=plan(project)
     routes={m['id']:g['id'] for g in result['groups'] for m in g['members'] if not m['handled'] and not m['protected'] and not m['other_problem']}
-    return {**project.data,'_term_routes':routes},result
+    return {**project.data,'_term_routes':routes,'_early_onset':early_onset_reasons(project),
+            '_deleted_prefixes':deleted_prefixes(project),
+            '_overlap_ids':overlap_ids(project.data['cues'], proposed)},result
 
 
 def apply(project,group_id,choice,text,token):

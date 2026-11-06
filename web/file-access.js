@@ -1,6 +1,6 @@
 'use strict';
 (()=>{
- document.querySelector('.local-badge').textContent=window.subtitleDesktop?'仅在本机处理 · 可拖入路径':'仅在本机处理 · 网页模式';
+ document.querySelector('.local-badge').textContent=window.subtitleDesktop?'语音在本机处理 · 可拖入路径':'语音在本机处理 · 网页模式';
  const dialog=$('path-browser');let resolvePick=null,kind='folder',listing=null,selection='',lastDirectory='',searchTimer,browseEpoch=0,locationDirty=false;
  const allowed={json:['json'],reference:['docx','pdf','txt','md'],srt:['srt'],media:['mp4','mkv','mov','avi','webm','wav','mp3','m4a','flac','aac']};
  const suffix=name=>name.split('.').at(-1).toLowerCase();
@@ -30,6 +30,7 @@
  $('browser-confirm').onclick=()=>{if(!$('browser-confirm').disabled)finish(kind==='folder'?listing.path:selection);};
  $('browser-create').onclick=handle(async()=>{if(!listing)return;const result=await request('mkdir',{parent:listing.path,name:$('browser-new-name').value});$('browser-new-name').value='';await loadPath(result.path);});
  function pick(nextKind,initial){
+  if(window.subtitleDesktop?.pickPath)return window.subtitleDesktop.pickPath(nextKind,initial);
   if(!state.file_access)throw Error('后台尚未更新，请先保存关闭项目并重启本应用');
   kind=nextKind;listing=null;selection='';$('browser-title').textContent=kind==='folder'?'选择本机或共享盘文件夹':'选择文件';$('browser-confirm').textContent=kind==='folder'?'选择当前文件夹':'选择此文件';
   $('browser-new-row').hidden=kind!=='folder';$('browser-search').value='';$('browser-new-name').value='';$('browser-entries').innerHTML='';dialog.showModal();

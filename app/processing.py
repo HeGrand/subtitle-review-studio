@@ -169,6 +169,12 @@ class Processor:
             raise UserError('已有本地任务正在运行。')
         if not episodes or not set(episodes) <= set(project.data['episodes']):
             raise UserError('请选择要处理的集数。')
+        generating = project.data.get('mode') == 'generation'
+        if generating:
+            from .generation import has_generated
+            episodes = [ep for ep in episodes if not has_generated(project, ep)]
+            if not episodes:
+                raise UserError('所选集数已生成，不会覆盖听改进度。')
         if not model_path:
             bundled = sorted((APP_ROOT / '.runtime/models').glob('*/model.bin'))
             if bundled:
@@ -176,7 +182,11 @@ class Processor:
         if (APP_ROOT / 'portable.json').exists() and not model_path:
             raise UserError('便携包内的识别模型缺失，请重新完整解压便携包；未自动联网下载。')
         self.stop.clear()
-        self.thread = threading.Thread(target=self._run, args=(project, episodes, model_path, download_model), daemon=True)
+        if generating:
+            from .generation_jobs import run_generation
+            self.thread = threading.Thread(target=run_generation, args=(self, project, episodes, model_path, download_model), daemon=True)
+        else:
+            self.thread = threading.Thread(target=self._run, args=(project, episodes, model_path, download_model), daemon=True)
         self.thread.start()
 
     def update(self, project, ep, **values):

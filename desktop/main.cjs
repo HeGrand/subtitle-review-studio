@@ -1,9 +1,10 @@
 'use strict';
-const {app,BrowserWindow,ipcMain,dialog}=require('electron');
+const {app,BrowserWindow,ipcMain,dialog,Menu}=require('electron');
 const fs=require('node:fs');const fsp=fs.promises;const path=require('node:path');const http=require('node:http');const {spawn}=require('node:child_process');
 const {normalizeAbsolute}=require('./paths.cjs');
 const root=fs.realpathSync(process.env.SUBTITLE_APP_ROOT||path.join(__dirname,'..'));
 const userData=path.join(root,'.runtime','desktop-user-data');fs.mkdirSync(userData,{recursive:true});app.setPath('userData',userData);
+if(process.platform==='win32')app.setAppUserModelId('SubtitleReviewStudio.Desktop');
 let window,backend,origin='',approvedExit=false,closePending=false;
 function get(url,headers={}){return new Promise((resolve,reject)=>{
  const request=http.get(url,{headers,timeout:2000},response=>{let body='';response.setEncoding('utf8');response.on('data',chunk=>body+=chunk);response.on('end',()=>response.statusCode===200?resolve(body):reject(Error('HTTP '+response.statusCode)));});
@@ -24,7 +25,7 @@ async function startServer(){
    const saved=JSON.parse(fs.readFileSync(record,'utf8'));
    if(/^http:\/\/127\.0\.0\.1:\d+\/$/.test(saved.url)){
     let alive=false;try{await get(saved.url);alive=true;}catch{}
-    if(alive){try{return await verifyServer(saved.url);}catch{throw Error('旧程序仍在运行。请先保存关闭原项目、关闭旧页面，再运行“重新启动字幕审查.cmd”。');}}
+    if(alive){try{return await verifyServer(saved.url);}catch{throw Error('旧程序仍在运行。请在旧窗口保存并退出字幕工作室，再双击“字幕工作室.exe”。');}}
    }
   }catch(error){if(error.message.startsWith('旧程序'))throw error;}
  }
@@ -41,6 +42,30 @@ function trusted(event){
  if(!window||event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame)throw Error('不允许此页面操作本机文件');
  if(new URL(event.senderFrame.url).origin!==origin)throw Error('页面地址不匹配');
 }
+const mediaFilter={name:'视频和音频',extensions:['mp4','mkv','mov','avi','webm','wav','mp3','m4a','flac','aac']};
+ipcMain.handle('subtitle:pick-path',async(event,kind,initial)=>{
+ trusted(event);
+ const filters=new Map([
+  ['folder',[]],['media',[mediaFilter]],['reference',[{name:'剧本和资料',extensions:['docx','txt','md','pdf']}]],
+  ['srt',[{name:'SRT 字幕',extensions:['srt']}]],['json',[{name:'JSON 文件',extensions:['json']}]]
+ ]);
+ if(!filters.has(kind))throw Error('未知文件选择类型');
+ let defaultPath;
+ if(initial){try{defaultPath=normalizeAbsolute(initial);}catch{}}
+ const result=await dialog.showOpenDialog(window,{
+  title:kind==='folder'?'选择文件夹':'选择文件',
+  properties:[kind==='folder'?'openDirectory':'openFile'],filters:filters.get(kind),defaultPath
+ });
+ return result.canceled||!result.filePaths.length?'':normalizeAbsolute(result.filePaths[0]);
+});
+ipcMain.handle('subtitle:pick-videos',async event=>{
+ trusted(event);
+ const result=await dialog.showOpenDialog(window,{
+  title:'批量选择视频或音频',properties:['openFile','multiSelections'],
+  filters:[mediaFilter]
+ });
+ return result.canceled?[]:result.filePaths.map(value=>normalizeAbsolute(value));
+});
 ipcMain.handle('subtitle:describe-paths',async(event,paths)=>{
  trusted(event);if(!Array.isArray(paths)||!paths.length||paths.length>20)throw Error('一次最多拖入20个文件');
  return Promise.all(paths.map(async value=>{
@@ -56,11 +81,12 @@ ipcMain.on('subtitle:close-ready',event=>{trusted(event);if(closePending){approv
 ipcMain.on('subtitle:close-cancel',event=>{trusted(event);closePending=false;});
 if(!app.requestSingleInstanceLock())app.quit();
 else{
- app.on('second-instance',()=>{if(window){if(window.isMinimized())window.restore();window.focus();}});
+ app.on('second-instance',()=>{if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
  app.whenReady().then(async()=>{
   try{
    const url=await startServer();origin=new URL(url).origin;
-   window=new BrowserWindow({title:'字幕工作室',width:1500,height:1000,minWidth:1000,minHeight:650,show:false,autoHideMenuBar:true,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
+   Menu.setApplicationMenu(null);
+   window=new BrowserWindow({title:'字幕工作室',width:1500,height:1000,minWidth:1000,minHeight:650,show:false,icon:path.join(__dirname,'studio.ico'),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
    window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
    window.webContents.on('will-navigate',(event,target)=>{if(new URL(target).origin!==origin)event.preventDefault();});
    window.on('close',event=>{if(!approvedExit){event.preventDefault();if(!closePending){closePending=true;window.webContents.send('subtitle:close-request');}}});

@@ -117,11 +117,16 @@ class Handler(BaseHTTPRequestHandler):
             if path in ('/', '/index.html'):
                 page = (APP_ROOT / 'web/index.html').read_text(encoding='utf-8').replace('__APP_TOKEN__', STATE.token)
                 return self.send(200, page.encode(), 'text/html; charset=utf-8')
-            if path in ('/style.css', '/review.css', '/app.js', '/review-helpers.js', '/file-access.js', '/file-access.css'):
+            if path == '/studio.svg':
+                return self.send(200, (APP_ROOT / 'web/studio.svg').read_bytes(), 'image/svg+xml')
+            if path in ('/style.css', '/review.css', '/app.js', '/review-helpers.js', '/file-access.js', '/file-access.css', '/generation.js', '/generation.css', '/split-wave.js'):
                 return self.send(200, (APP_ROOT / 'web' / path[1:]).read_bytes(), 'text/css' if path.endswith('.css') else 'text/javascript; charset=utf-8')
             self.authorize()
             if path == '/api/capabilities':
-                return self.send(200,{'version':__version__,'file_browser':True,'app_root':str(APP_ROOT)})
+                return self.send(200,{'version':__version__,'file_browser':True,'generation':True,'app_root':str(APP_ROOT)})
+            if path == '/api/ai-config':
+                from .ai_config import public_config
+                return self.send(200, public_config())
             if path == '/api/state':
                 with STATE.mutex:
                     STATE.client_check(self.headers.get('X-Client'))
@@ -139,7 +144,14 @@ class Handler(BaseHTTPRequestHandler):
                     output = p.root / 'cache/waveforms' / (ep + '.json')
                     if not output.exists() or read_json(output).get('version') != 2:
                         waveform(p.root / e['audio'], output)
-                    return self.send(200, read_json(output))
+                    result = read_json(output)
+                    if q.get('include_words') == ['1']:
+                        from .processing import aligned_words
+                        start, end = int(q['start_ms'][0]), int(q['end_ms'][0])
+                        if not 0 <= start < end <= e['duration_ms']:
+                            raise UserError('波形字幕范围无效')
+                        result['words'] = aligned_words(read_json(p.root / e['transcript']), start, end) if e.get('transcript') else []
+                    return self.send(200, result)
             if path == '/api/media':
                 with STATE.mutex:
                     p = STATE.project
@@ -212,6 +224,18 @@ class Handler(BaseHTTPRequestHandler):
             route = urllib.parse.urlsplit(self.path).path.removeprefix('/api/')
             with STATE.mutex:
                 STATE.client_check(self.headers.get('X-Client'))
+            if route == 'ai-config-save':
+                from .ai_config import save_config
+                return self.send(200, {'ok': True, 'result': save_config(body)})
+            if route == 'ai-config-test':
+                from .ai_config import test_connection
+                return self.send(200, {'ok': True, 'result': test_connection()})
+            if route == 'generation-ai-extract':
+                return self.send(200, {'ok': True, 'result': self.ai_extract(body)})
+            if route == 'generation-ai-wrap':
+                return self.send(200, {'ok': True, 'result': self.ai_wrap(body)})
+            if route == 'ai-review-episode':
+                return self.send(200, {'ok': True, 'result': self.ai_review_episode(body)})
             if route == 'browse':
                 return self.send(200,browse(body.get('path',''),body.get('kind','folder'),body.get('query','')))
             if route == 'mkdir':
@@ -228,7 +252,15 @@ class Handler(BaseHTTPRequestHandler):
                 if route == 'scan':
                     return self.send(200, scan_pairs(body.get('media_dir'), body.get('srt_dir')))
                 if route in ('create', 'open'):
+                    mode = body.get('mode', 'review')
+                    if route == 'create' and mode not in ('review', 'generation'):
+                        raise UserError('未知项目模式')
                     STATE.switch(body['folder'], body.get('name', '') if route == 'create' else None)
+                    if route == 'create':
+                        STATE.project.data['mode'] = mode
+                        if mode == 'generation':
+                            STATE.project.data['review_scope'] = 'generated_subtitles'
+                        STATE.project.save()
                     return self.send(200, {'ok': True})
                 if route == 'close':
                     if STATE.project:
@@ -236,8 +268,13 @@ class Handler(BaseHTTPRequestHandler):
                             errors = STATE.project.validate_export(delivery=True)
                             if errors:
                                 raise UserError('仍有待审或格式问题，不能标记完成：\n' + '\n'.join(errors[:15]))
-                            if not any(e['type'] == 'delivery' and e.get('revision') == STATE.project.data['revision'] for e in STATE.project.data['exports']):
-                                raise UserError('请先导出本次修订的交付版。')
+                            data = STATE.project.data
+                            delivered = {episode for export in data['exports']
+                                         if export['type'] == 'delivery' and export.get('revision') == data['revision']
+                                         for episode in export.get('episodes', [])}
+                            missing = sorted(data['episodes'].keys() - delivered)
+                            if missing:
+                                raise UserError('本次修订还有集数未导出交付版：' + '、'.join(missing))
                             STATE.project.data['finished'] = True
                         STATE.project.close()
                         STATE.project = None
@@ -270,12 +307,61 @@ class Handler(BaseHTTPRequestHandler):
             self.send(500, {'error': '操作失败，进度未切换：' + str(exc)})
 
     def project_action(self, route, b, p):
+        if route.startswith('generation-'):
+            from . import generation
+            generation.require_generation(p)
+            if route == 'generation-script':
+                return generation.import_script(p, b['path'])
+            if route == 'generation-confirm':
+                return generation.confirm_lines(p, b['episode'], b['language'], b['lines'])
+            if route == 'generation-mark-lines':
+                return generation.mark_lines(p, b['episode'], b['language'], b['confirmed'])
+            if route == 'generation-video':
+                return generation.add_video(p, b['episode'], b['media'], b['language'])
+            if route == 'generation-episode-versions':
+                return generation.episode_versions(p, b['episode'])
+            if route == 'generation-restore-version':
+                return generation.restore_episode_version(p, b['episode'], b['version_id'])
+            if route == 'generation-reset-episode':
+                return generation.reset_episode(p, b['episode'])
+            if route == 'generation-onset-preview':
+                from .onset import preview
+                return preview(p, b['episode'])
+            if route == 'generation-gap-preview':
+                from .onset import gap_preview
+                return gap_preview(p, b['episode'])
+            if route == 'generation-gap-apply':
+                from .onset import apply_gaps
+                if b.get('preview_revision') != p.data['revision']:
+                    raise UserError('字幕已变化，请重新预览短空档。')
+                return apply_gaps(p, b['episode'], b['ids'])
+            if route == 'generation-onset-apply':
+                from .onset import apply
+                if b.get('preview_revision') != p.data['revision']:
+                    raise UserError('字幕已变化，请重新预览入点建议。')
+                return apply(p, b['episode'], b['changes'])
+            if route == 'generation-settings':
+                values = b['settings']
+                limits = {'max_line_chars_en': (8, 80), 'max_line_chars_zh': (8, 40), 'max_cue_seconds': (1, 12)}
+                for key, bounds in limits.items():
+                    value = float(values[key])
+                    if not bounds[0] <= value <= bounds[1]:
+                        raise UserError('断句设置超出允许范围')
+                settings = {k: float(values[k]) if k == 'max_cue_seconds' else int(values[k]) for k in limits}
+                p.data.setdefault('generation', {})['settings'] = settings
+                p.commit('修改生成断句设置')
+                return
         if route == 'pairs':
+            if p.data.get('mode') == 'generation':
+                raise UserError('生成项目请添加视频，无需导入已有 SRT。')
             return p.import_pairs(b['pairs'])
         if route == 'edit':
             return p.edit(b['ids'], b['action'], b.get('values'))
+        if route == 'subtitle-layout':
+            from .subtitle_layout import layout
+            return layout(p, b['id'], b['action'], b['values'])
         if route == 'add-cue':
-            return p.add_cue(b['episode'], b['row'])
+            return p.add_cue(b['episode'], b['row'], b.get('issue_id'))
         if route == 'undo':
             return p.undo()
         if route == 'apply-certain':
@@ -348,10 +434,144 @@ class Handler(BaseHTTPRequestHandler):
             item = next((x for x in items if x['id'] == b['id']), None)
             if not item:
                 raise UserError('事项不存在')
+            snapshot_key = {'issue': 'issues_before', 'task': 'review_tasks_before'}.get(b['kind'])
+            extra = {snapshot_key: copy.deepcopy(items)} if snapshot_key else None
             item.update(resolved=bool(b['resolved']), resolution=str(b.get('note', '人工已查看并决定')), resolved_at=time.time())
-            p.commit('人工处理独立疑点/意见冲突')
+            p.commit('人工处理独立疑点/意见冲突', extra=extra)
             return
         raise UserError('未知操作')
+
+    def ai_review_episode(self, body):
+        from .api_review import boundary_plan, opinion, review_rows
+        from .core import digest
+        ep = body['episode']
+        with STATE.mutex:
+            p = STATE.project
+            if (not p or body.get('project_id') != p.data['project_id']
+                    or body.get('revision') != p.data['revision'] or STATE.processor.active()):
+                raise UserError('项目已变化或正在处理，请稍后重试。')
+            revision = p.data['revision']
+            ordered = sorted((c for c in p.snapshot()['cues'] if c['episode'] == ep and not c['accepted']['deleted']),
+                             key=lambda c: (c['accepted']['start_ms'], c['id']))
+            cues = [c for c in ordered if c['status'] != 'approved' and not c.get('draft')]
+            previous_run = p.data.get('api_review_runs', {}).get(ep, {})
+            if body.get('resume'):
+                cues = [c for c in cues if c.get('api_review', {}).get('snapshot_hash') != digest(c['accepted'])]
+            if not cues:
+                if body.get('resume'):
+                    return {'reviewed': 0, 'findings': 0, 'skipped': 0, 'unreviewed': 0, 'ignored': 0, 'failures': []}
+                raise UserError('本集没有可复查的待审字幕。')
+            eligible = {c['id'] for c in cues}
+            following = {a['id']: b for a, b in zip(ordered, ordered[1:]) if b['id'] in eligible
+                         and p.data.get('mode') == 'generation'
+                         and 0 <= b['accepted']['start_ms'] - a['accepted']['end_ms'] < 500}
+            rows = [{'id': c['id'], 'subtitle': c['accepted']['text'],
+                     'asr': c['script_context']['asr_text'],
+                     'script': c['script_context']['script_excerpt'] if c['script_context']['script_status'] == 'matched' else '',
+                     'context_candidate': c['script_context']['script_excerpt'] if c['script_context']['script_status'] == 'context_candidate' else ''}
+                    for c in cues]
+            for row, cue in zip(rows, cues):
+                coverage = cue['script_context'].get('script_coverage')
+                if coverage:
+                    row['script'] = coverage['text']
+                    row['script_coverage'] = {key: coverage[key] for key in ('from', 'to', 'total', 'missing')}
+                if row['id'] in following:
+                    row['next'] = following[row['id']]['accepted']['text']
+        failures = []
+        findings, reviewed, ignored = review_rows(rows, failures)
+        saved, skipped = 0, 0
+        with STATE.mutex:
+            if STATE.project is not p or p.data['revision'] != revision or STATE.processor.active():
+                raise UserError('复查期间项目发生变化，建议未保存，请重试。')
+            index, before = p.by_id(), []
+            for item in cues:
+                if item['id'] not in reviewed:
+                    continue
+                c = index[item['id']]
+                result = findings.get(c['id'])
+                has_asr = bool(item['script_context']['asr_text'].strip())
+                if not result and not has_asr:
+                    skipped += 1
+                if not result and not has_asr and not c.get('api_review'):
+                    continue
+                before.append(copy.deepcopy(c))
+                c['opinions'] = [o for o in c['opinions'] if o.get('origin') != 'api_review']
+                c.pop('api_review', None)
+                if result:
+                    layout = boundary_plan(p, c, following.get(c['id']), result[2])
+                    c['opinions'].append(opinion(c, item['script_context'], result, layout))
+                    c['api_review'] = {'snapshot_hash': digest(c['accepted']), 'reason': result[0]}
+                    saved += 1
+                elif has_asr:
+                    c['api_review'] = {'snapshot_hash': digest(c['accepted']), 'result': 'clear'}
+                    saved += 1
+            summary = {'reviewed': saved, 'findings': len(findings), 'skipped': skipped,
+                       'unreviewed': len(cues) - len(reviewed),
+                       'unreviewed_ids': [c['id'] for c in cues if c['id'] not in reviewed],
+                       'ignored': ignored, 'failures': list(dict.fromkeys(failures))}
+            runs = p.data.setdefault('api_review_runs', {})
+            runs[ep] = summary
+            p.commit('AI 复查本集字幕', before, {'api_review_run_before': {'episode': ep, 'value': previous_run}})
+        return summary
+
+    def ai_wrap(self, body):
+        from .generation import ai_wrap_lines, has_generated, require_generation
+        ep, lang = body['episode'], body['language']
+        if lang not in ('en', 'zh'):
+            raise UserError('请选择中文或英文')
+        with STATE.mutex:
+            p = STATE.project
+            if not p or body.get('project_id') != p.data['project_id'] or body.get('revision') != p.data['revision']:
+                raise UserError('项目已变化，请刷新后重试')
+            require_generation(p)
+            if STATE.processor.active() or has_generated(p, ep):
+                raise UserError('只可对尚未生成的本集文稿进行 AI 断句')
+            g = p.data.get('generation', {})
+            if ep not in p.data['episodes'] and ep not in g.get('episode_source', {}):
+                raise UserError('未找到本集')
+            width = int(g.get('settings', {}).get('max_line_chars_' + lang, 18 if lang == 'zh' else 42))
+            revision = p.data['revision']
+        lines = ai_wrap_lines(body['text'], lang, width)
+        with STATE.mutex:
+            if STATE.project is not p or p.data['revision'] != revision or STATE.processor.active():
+                raise UserError('断句期间项目发生变化，请重试')
+        return {'lines': lines}
+
+    def ai_extract(self, body):
+        from .generation import ai_wrap_groups, has_generated, join_extracted_dialogue, require_generation
+        from .ai_config import extract_lines
+        ep, lang = f"{int(body['episode']):02}", body['language']
+        if lang not in ('en', 'zh'):
+            raise UserError('请选择中文或英文')
+        with STATE.mutex:
+            p = STATE.project
+            if not p or body.get('project_id') != p.data['project_id'] or body.get('revision') != p.data['revision']:
+                raise UserError('项目已变化，请刷新后重试')
+            require_generation(p)
+            if STATE.processor.active() or has_generated(p, ep):
+                raise UserError('生成中或已进入听改的集数不能重新提取')
+            source = copy.deepcopy(p.data.get('generation', {}).get('episode_source', {}).get(ep, []))
+            if not source:
+                raise UserError('未找到本集剧本')
+            revision = p.data['revision']
+            width = int(p.data['generation'].get('settings', {}).get('max_line_chars_' + lang, 18 if lang == 'zh' else 42))
+            reference = next(r for r in p.data['references'] if r['id'] == p.data['generation']['reference_id'])
+        result = join_extracted_dialogue(extract_lines(source, lang), lang)
+        groups, fallback = ai_wrap_groups([line['text'] for line in result], lang, width, fallback=True)
+        with STATE.mutex:
+            if STATE.project is not p or p.data['revision'] != revision or STATE.processor.active():
+                raise UserError('提取期间项目发生变化，结果未写入，请重试')
+            by_line = {x['line']: x['text'] for x in source}
+            lines = [{'episode': ep, 'language': lang, 'speaker': x['speaker'], 'text': text,
+                      'source': {'path': str(reference['text_file']).replace('\\', '/'), 'line': x['line'], 'end_line': x['end_line'],
+                                 'text': '\\n'.join(by_line[n] for n in range(x['line'], x['end_line'] + 1))}}
+                     for x, group in zip(result, groups) for text in group]
+            g = p.data['generation']
+            g['lines'] = [x for x in g['lines'] if not (x['episode'] == ep and x['language'] == lang)] + lines
+            g['edited_lines'] = [key for key in g.get('edited_lines', []) if key != ep + ':' + lang]
+            g.get('line_confirmations', {}).pop(ep + ':' + lang, None)
+            p.commit('AI 提取并断句，等待确认台词')
+            return {'lines': len(lines), 'fallback': fallback}
 
 
 def main():

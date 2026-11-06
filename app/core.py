@@ -245,13 +245,14 @@ class Project:
             if data.get('schema') != SCHEMA:
                 raise UserError('项目格式版本不受支持，请保留原件并使用对应版本程序。')
             p = cls(root, data, lock)
-            from .review import migrate
+            from .review import migrate, restore_post_approval_evidence
             if data.get('review_migration_version') != 1:
                 (root / 'history').mkdir(exist_ok=True)
                 backup_path = root / 'history' / 'before-review-classification-v2.json'
                 if not backup_path.exists():
                     shutil.copy2(root / 'project.json',backup_path)
             migrate(data)
+            restore_post_approval_evidence(data)
             for job in data['jobs'].values():
                 if job.get('status') in ('running', 'preparing'):
                     job.update(status='paused', message='上次程序中断，点击继续可复用已完成分段。')
@@ -297,23 +298,52 @@ class Project:
                 job['error'] = explain_error(job.get('message', '未知错误'))
         d['fingerprint'] = self.source_fingerprint()
         d['history_count'] = len(self.data['history'])
+        if d.get('mode') == 'generation':
+            d['versioned_episodes'] = sorted({h['extra']['episode'] for h in self.data['history']
+                if h.get('extra', {}).get('episode') and h['extra'].get('archive')})
         for c in d['cues']:
             c['current'] = proposed(c)
-        from .review import category, LABELS, human_reasons, issue_in_scope, task_in_scope
+        from .review import category, LABELS, human_reasons, issue_pending, issue_in_scope, task_in_scope
         from .terminology import context
         review_data,terms = context(self)
+        from .script_context import annotate_entries, tokens
+        source_entries = annotate_entries(self.root, d['references'], d['episodes'], [
+            {'stable_id': c['id'], 'episode': c['episode'], 'original': c['accepted']['text'],
+             'raw_original': c['original'], 'generation_source': c.get('generation_source'), 'script_locator': c.get('script_locator'),
+             'start_ms': c['accepted']['start_ms'], 'end_ms': c['accepted']['end_ms'], 'deleted': c['accepted']['deleted']}
+            for c in d['cues']], d.get('generation', {}).get('lines', []) if d.get('mode') == 'generation' else None)
+        source_by_id = {e['stable_id']: e for e in source_entries}
         d['term_groups']=terms['groups']
         d['review_scope']=self.data.get('review_scope','existing_subtitles')
         for task in d.get('review_tasks',[]):task['in_scope']=task_in_scope(self.data,task)
         counts = {k: 0 for k in LABELS}
         for c in d['cues']:
+            source = source_by_id[c['id']]
+            c['script_context'] = {k: source[k] for k in ('script_status', 'script_text', 'script_excerpt', 'script_source', 'asr_text')}
+            if coverage := c.get('script_coverage'):
+                c['script_context'].update(script_status='partial', script_coverage=coverage, script_text=coverage['text'])
+            if prefix := review_data['_deleted_prefixes'].get(c['id']):
+                c['script_context'].update(script_status='context_candidate', script_excerpt=prefix['text'])
+                c['deleted_prefix'] = prefix
+            if d.get('mode') == 'generation' and source['script_status'] == 'matched':
+                asr = [word for word, _, _ in tokens(source['asr_text'])]
+                if asr and asr == [word for word, _, _ in tokens(source['script_excerpt'])]:
+                    outdated = '实说内容未能确定对应剧本：保留识别文字，请听改'
+                    c['note'] = '；'.join(note for note in c.get('note', '').split('；') if note != outdated)
             c['category'] = category(c, review_data)
             c['category_label'] = LABELS[c['category']]
             c['human_reasons']=human_reasons(c,review_data)
             counts[c['category']] += 1
+        runs = d.get('api_review_runs', {})
+        if runs:
+            eligible = {c['id'] for c in d['cues'] if c['status'] != 'approved' and not c.get('draft')
+                        and not c['accepted']['deleted']}
+            for run in runs.values():
+                if 'unreviewed_ids' in run:
+                    run['unreviewed'] = sum(cid in eligible for cid in run['unreviewed_ids'])
         d['review_counts'] = counts
         counts['standalone_candidates'] = len({i.get('triage',{}).get('group_id') or i['id'] for i in self.data['issues']
-                                               if not i.get('cue_id') and issue_in_scope(self.data,i) and not i.get('resolved') and i.get('triage',{}).get('result') != 'dismissed'})
+                                               if not i.get('cue_id') and issue_in_scope(self.data,i) and issue_pending(i)})
         counts['outside_scope'] = sum(not i.get('cue_id') for i in self.data['issues'])
         counts['extra_tasks'] = sum(not t.get('resolved') and task_in_scope(self.data,t) for t in self.data.get('review_tasks', []))
         return d
@@ -473,6 +503,8 @@ class Project:
         if not ids or any(cid not in index for cid in ids):
             raise UserError('没有有效选择，或条目ID不存在。')
         before, updated = [], []
+        issues_before = None
+        shifted = []
         for cid in dict.fromkeys(ids):
             cue = copy.deepcopy(index[cid])
             row = copy.deepcopy(proposed(cue))
@@ -499,9 +531,20 @@ class Project:
             elif action == 'approve':
                 if cue.get('draft_time_error'):
                     raise UserError('草稿时间尚未修复：' + cue['draft_time_error'])
+                if 'onset_target' in values:
+                    target = values['onset_target']
+                    suggestion = next((item for item in reversed(cue.get('time_adjustments', []))
+                                       if item.get('field') == 'start_ms' and item.get('applied') is False
+                                       and item.get('from') == row['start_ms'] and item.get('to') == target), None)
+                    if len(ids) != 1 or type(target) is not int or not suggestion or not row['start_ms'] < target < row['end_ms']:
+                        raise UserError('入点建议已变化，请重新试听。')
+                    row['start_ms'] = target
+                    suggestion['applied'] = True
                 errs = validate_row(row, self.data['episodes'][cue['episode']]['duration_ms'])
                 if errs:
                     raise UserError('；'.join(errs))
+                if ' '.join(row['text'].split()) != ' '.join(cue['accepted']['text'].split()):
+                    cue.pop('script_coverage', None)
                 cue.update(accepted=row, draft=None, status='approved', confirmed_at=now())
                 cue.pop('manual_hold',None)
                 cue.pop('draft_time_inputs', None)
@@ -526,14 +569,74 @@ class Project:
                 raise UserError('不支持的操作')
             before.append(copy.deepcopy(index[cid]))
             updated.append(cue)
+        if action == 'approve':
+            from .review import overlap_ids
+            replacement = {cue['id']: cue for cue in updated}
+            approved_ids = set(replacement)
+            for episode in {cue['episode'] for cue in updated}:
+                ordered = sorted((cue for cue in self.data['cues'] if cue['episode'] == episode
+                                  and not accepted(replacement.get(cue['id'], cue))['deleted']),
+                                 key=lambda cue: (accepted(cue)['start_ms'], cue['id']))
+                for original, following in zip(ordered, ordered[1:]):
+                    if original['id'] not in approved_ids:
+                        continue
+                    end = accepted(replacement[original['id']])['end_ms']
+                    next_id = following['id']
+                    neighbor = replacement.get(next_id, following)
+                    base, draft = accepted(neighbor), neighbor.get('draft')
+                    if end <= base['start_ms'] and (not draft or draft['deleted'] or end <= draft['start_ms']):
+                        continue
+                    if neighbor.get('draft_time_error'):
+                        raise UserError('下一条的时间草稿无效，请先修正它的入点或出点。')
+                    new_start = end
+                    if draft and not draft['deleted'] and end > base['start_ms']:
+                        new_start = max(end, draft['start_ms'])
+                    if (end > base['start_ms'] and new_start >= base['end_ms']
+                            or draft and not draft['deleted'] and end >= draft['end_ms']):
+                        raise UserError('本条出点会覆盖下一条的整段时间，请缩短本条或调整下一条。')
+                    if next_id not in replacement:
+                        neighbor = copy.deepcopy(neighbor)
+                        before.append(copy.deepcopy(following))
+                        updated.append(neighbor)
+                        replacement[next_id] = neighbor
+                    if end > base['start_ms']:
+                        neighbor['accepted']['start_ms'] = new_start
+                    if draft and not draft['deleted'] and end > draft['start_ms']:
+                        neighbor['draft']['start_ms'] = end
+                    if next_id not in approved_ids:
+                        neighbor.update(status='pending', manual_hold=True, confirmed_at=None)
+                    shifted.append({'episode': episode, 'number': neighbor.get('source_number'),
+                                    'start_ms': proposed(neighbor)['start_ms']})
+            overlaps = overlap_ids((replacement.get(cue['id'], cue) for cue in self.data['cues']), accepted)
+            if overlaps & approved_ids:
+                raise UserError('本条与前一条重叠，请调整本条入点或前一条出点。')
         for cue in updated:
             index[cue['id']].clear()
             index[cue['id']].update(cue)
+        if action in ('approve', 'delete'):
+            linked = {cue.get('added_for_issue') for cue in updated
+                      if cue['id'] in ids and cue.get('added_for_issue')}
+            issues = [issue for issue in self.data['issues'] if issue['id'] in linked]
+            if issues:
+                issues_before = copy.deepcopy(self.data['issues'])
+                for issue in issues:
+                    issue.update(resolved=action == 'approve', resolution='已补字幕并确认' if action == 'approve' else '')
+        if action == 'approve' and self.data.get('mode') == 'generation':
+            from .script_context import deleted_prefixes
+            prefixes = deleted_prefixes(self)
+            for cue in updated:
+                if cue['id'] in ids and cue['id'] in prefixes:
+                    index[cue['id']]['prefix_reviewed'] = prefixes[cue['id']]['fingerprint']
         from .review import reconcile_human_tasks
         reconcile_human_tasks(self.data)
-        self.commit(action, before, {'review_tasks_before':tasks_before} if tasks_before != self.data.get('review_tasks',[]) else None)
+        extra = {'review_tasks_before': tasks_before} if tasks_before != self.data.get('review_tasks', []) else {}
+        if issues_before is not None:
+            extra['issues_before'] = issues_before
+        self.commit(action, before, extra)
+        if action == 'approve':
+            return {'shifted': shifted}
 
-    def add_cue(self, episode, row):
+    def add_cue(self, episode, row, issue_id=None):
         if episode not in self.data['episodes']:
             raise UserError('请先选择已导入的集数。')
         row = {k: row[k] for k in ('text', 'start_ms', 'end_ms')}
@@ -545,15 +648,23 @@ class Project:
         base = dict(row, deleted=True)
         cue = {'id': cid, 'episode': episode, 'source_number': None, 'original': copy.deepcopy(base),
                'accepted': base, 'draft': row, 'status': 'pending', 'note': '', 'opinions': [], 'confirmed_at': None}
+        if issue_id:
+            if not any(i['id'] == issue_id and i['episode'] == episode and not i.get('cue_id') for i in self.data['issues']):
+                raise UserError('找不到对应的未匹配片段。')
+            cue['added_for_issue'] = issue_id
         self.data['cues'].append(cue)
         self.commit('补字幕（待确认）', extra={'added': [cid]})
         return cid
 
     def undo(self):
         for h in reversed(self.data['history']):
+            if h['label'] in ('清空本集字幕并保留旧版本', '恢复本集字幕版本'):
+                raise UserError('不能跨越整集重跑撤销，旧版本已保存在项目的 history 文件夹。')
             if h['label'] in ('从本轮移出集数', '恢复移出集数'):
                 raise UserError('集数范围已调整；请使用素材页的恢复入口。此前人工记录仍保留，不能跨越范围调整撤销。')
-            if not h['undone'] and (h['before'] or h.get('extra', {}).get('added') or h.get('extra',{}).get('issues_before')):
+            if not h['undone'] and (h['before'] or h.get('extra', {}).get('added')
+                                    or any(key in h.get('extra', {}) for key in
+                                           ('issues_before', 'review_tasks_before', 'api_review_run_before'))):
                 index = self.by_id()
                 for old in h['before']:
                     index[old['id']].clear()
@@ -564,6 +675,12 @@ class Project:
                     self.data['review_tasks'] = copy.deepcopy(h['extra']['review_tasks_before'])
                 if 'issues_before' in h.get('extra',{}):
                     self.data['issues'] = copy.deepcopy(h['extra']['issues_before'])
+                if run := h.get('extra', {}).get('api_review_run_before'):
+                    runs = self.data.setdefault('api_review_runs', {})
+                    if run['value']:
+                        runs[run['episode']] = copy.deepcopy(run['value'])
+                    else:
+                        runs.pop(run['episode'], None)
                 h['undone'] = True
                 self.commit('撤销：' + h['label'])
                 return
@@ -647,6 +764,8 @@ class Project:
                     c['draft'] = row
                     pending.append('EDIT')
                 else:
+                    if ' '.join(row['text'].split()) != ' '.join(c['accepted']['text'].split()):
+                        c.pop('script_coverage', None)
                     c['accepted'] = row
             c['status'] = 'pending' if pending and not c['accepted']['deleted'] else 'approved'
             c['legacy_key'] = key
@@ -678,12 +797,16 @@ class Project:
     def validate_export(self, episodes=None, delivery=False):
         from .review import category, issue_pending, issue_in_scope, task_in_scope
         from .terminology import context
+        from .generation import SUBTITLE_PUNCTUATION
+        import unicodedata
         review_data,_=context(self)
         wanted = set(episodes or self.data['episodes'])
         errors = []
         if not wanted or not wanted <= set(self.data['episodes']):
             return ['请选择有效集数']
         for ep in sorted(wanted):
+            if self.data.get('mode') == 'generation' and not self.data['episodes'][ep].get('original_srt'):
+                errors.append(f'第{ep}集尚未生成字幕')
             previous = None
             for c in sorted((c for c in self.data['cues'] if c['episode'] == ep), key=lambda c: (accepted(c)['start_ms'], c['id'])):
                 row = accepted(c)
@@ -696,17 +819,41 @@ class Project:
                         errors.append(f'{ep} 有尚未确认的新增/恢复字幕')
                     continue
                 errors += [f'{ep} / {c["source_number"] or c["id"][:8]}：{s}' for s in validate_row(row, self.data['episodes'][ep]['duration_ms'])]
+                if delivery:
+                    label = f'{ep} / {c["source_number"] or c["id"][:8]} · {stamp(row["start_ms"])}'
+                    lines = row['text'].splitlines()
+                    if len(lines) > 2 or len(''.join(lines)) > 44:
+                        errors.append(f'{label}：字幕须在两行以内，且不超过 44 字符')
+                    if any(unicodedata.category(ch).startswith('P') and
+                           (ord(ch) in SUBTITLE_PUNCTUATION or unicodedata.east_asian_width(ch) in ('F', 'W'))
+                           for ch in row['text']):
+                        errors.append(f'{label}：请将标点改为英文半角')
                 if previous and row['start_ms'] < previous:
-                    errors.append(f'{ep} / {c["source_number"] or c["id"][:8]}：与上一条重叠')
+                    errors.append(f'{ep} / {c["source_number"] or c["id"][:8]} · {stamp(row["start_ms"])}：与上一条重叠')
                 previous = max(previous or 0, row['end_ms'])
         if delivery:
+            index = self.by_id()
             for issue in self.data['issues']:
-                if issue.get('episode') in wanted and not issue.get('cue_id') and issue_in_scope(self.data,issue) and issue_pending(issue):
-                    errors.append(f'{issue["episode"]}：独立疑点 {issue["id"]} 仍待人工决定')
+                linked_cue = index.get(issue.get('cue_id'))
+                scope = linked_cue['episode'] if linked_cue else str(issue.get('episode') or '')
+                retained = issue.get('triage', {}).get('result') == 'retained'
+                if ((scope in wanted or scope not in self.data['episodes'])
+                        and (not issue.get('cue_id') or retained)
+                        and issue_in_scope(self.data, issue) and issue_pending(issue)):
+                    excerpt = issue.get('evidence_text') or issue.get('message') or issue['id']
+                    errors.append(f'{scope or "集数未定位"} · {stamp(issue.get("start_ms", 0))}：{issue.get("kind", "独立疑点")}待处理，{excerpt[:100]}')
             if any(not x.get('resolved') for x in self.data['opinion_conflicts']):
                 errors.append('有待处理的意见导入冲突')
-            if any(not t.get('resolved') and task_in_scope(self.data,t) and (t.get('episode') in wanted or set(t.get('related_episodes', [])) & wanted) for t in self.data.get('review_tasks', [])):
-                errors.append('有未处理的具体疑点或尚未完成的审查任务')
+            for task in self.data.get('review_tasks', []):
+                if task.get('resolved') or not task_in_scope(self.data, task):
+                    continue
+                scope = {str(task.get('episode') or '')}
+                scope.update(str(ep) for ep in task.get('related_episodes', []))
+                scope.update(index[cid]['episode'] for cid in task.get('related_stable_ids', []) if cid in index)
+                scope.intersection_update(self.data['episodes'])
+                if not scope or scope & wanted:
+                    errors.append('有未处理的具体疑点或尚未完成的审查任务')
+                    break
         return errors
 
     def srt_text(self, episode):
