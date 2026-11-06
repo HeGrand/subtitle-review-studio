@@ -8,6 +8,7 @@ const root=path.resolve(process.argv[2]),work=path.resolve(process.argv[3]);fs.m
  browser=await chromium.launch({headless:true,...(process.env.REVIEW_BROWSER_PATH?{executablePath:process.env.REVIEW_BROWSER_PATH}:{})});const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(url);await page.waitForSelector('#home:not([hidden])');await page.waitForFunction(()=>document.getElementById('recent-list').textContent.includes('还没有项目'));
  const folder=path.join(work,'我的字幕项目');fs.mkdirSync(folder);await page.click('#home-create');await page.fill('#new-name','便携版新项目');await page.fill('#project-folder',folder);await page.click('#modal-ok');await page.waitForSelector('#workspace:not([hidden])');
+ await page.locator('#processing-settings > summary').click();
  const model=await page.inputValue('#model-select');assert(model.startsWith(root));assert.match(model,/large-v3-turbo/);assert.match(await page.locator('#model-select option:checked').innerText(),/内置多语言模型/);assert(!(await page.locator('#model-select').innerText()).includes('首次自动下载'));
  if(await page.locator('#acceleration-reset').count()){
   assert.match(await page.locator('#acceleration-status').innerText(),/GPU|CPU|自动检测/);
