@@ -12,6 +12,7 @@ A local-first subtitle review workbench for Windows: Whisper transcription, auto
 
 - **已有旧版**：可只下载`update.zip`，关闭旧程序后覆盖到程序目录；不必重下模型/GPU，详见安装说明。
 - **主程序包**：内含 Python、依赖、FFmpeg 和多语言识别模型，解压后可用 CPU 初查。
+- **英文 WhisperX 组件包（可选）**：与同版本主程序配套，解压到主程序目录，合并 `.runtime`。内含英文词级对齐模型，可离线进行文稿匹配。
 - **GPU 组件包（可选）**：NVIDIA 用户将它解压到主程序目录，合并 `.runtime` 文件夹，即可自动测速并启用 GPU。无需安装系统 CUDA。
 - 发布附件附带 SHA-256 清单。请完整解压后双击 **字幕工作室.exe**，不要在压缩包内直接运行。
 
@@ -91,6 +92,8 @@ python scripts/build_launcher.py
 也可双击 `准备环境.cmd` 自动准备组件；源码方式首次安装依赖和模型需要网络。已经完整解压的便携版不会执行这一下载流程。
 
 源码目录不包含模型和 NVIDIA 二进制组件。准备本地模型及 GPU 组件、构建便携包的方法见 [BUILD.md](docs/BUILD.md)。
+
+英文文稿匹配支持 WhisperX 3.2.0。含 WhisperX 的 Windows 完整便携包可离线对齐英文台词。源码启动时也可使用本机 Python 的 WhisperX、faster-whisper 1.2.1 和 PyTorch 缓存里的英文 wav2vec2 模型。未配置这套环境时，生成队列会提示使用原匹配流程。
 
 ## 开发与测试
 

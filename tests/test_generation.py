@@ -26,6 +26,47 @@ def script_line(text):
 
 
 class GenerationTests(unittest.TestCase):
+    def test_local_alignment_exposes_unmatched_script_and_only_blocks_delivery_for_it(self):
+        from app.review import valid_local_alignment
+        from app.whisperx_match import match_lines
+
+        lines = [script_line('Hello there!'), script_line('Goodbye.')]
+        primary = [dict(word='Hello', start=.4, end=.6, score=.9),
+                   dict(word='there', start=.6, end=.8, score=.9)]
+        rows, issues = match_lines(lines, primary, [], lambda *_: primary, 2, {})
+        self.assertEqual([r['text'] for r in rows], ['Hello there!'])
+        self.assertEqual([(x['script_text'], x['estimated']) for x in issues], [('Goodbye.', True)])
+        add_video(self.p, 32, self.media, 'en')
+        install_cues(self.p, '32', {'duration': 2, 'segments': []}, prepared_rows=rows,
+                     unmatched_script=issues, local_alignment=True)
+        self.assertEqual(self.p.validate_export(), [])
+        errors = self.p.validate_export(delivery=True)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('Goodbye.', errors[0])
+        cue = self.p.data['cues'][0]
+        self.assertTrue(valid_local_alignment(cue))
+        cue['accepted']['start_ms'] += 1
+        self.assertFalse(valid_local_alignment(cue))
+
+    def test_overlapping_script_candidate_cannot_claim_an_unmatched_tail(self):
+        lines = [script_line('I know you can'), script_line('You can leave.')]
+        extra = []
+        rows = build_cues(transcript('I know you can leave.'), lines, 'en', {'script_only': True}, extra)
+        self.assertEqual([row['text'] for row in rows], ['I know you can'])
+        self.assertEqual([[word['text'] for word in fragment] for fragment in extra], [['leave.']])
+
+    def test_complete_pause_bounded_line_wins_over_longer_candidate_crossing_pause(self):
+        lines = [script_line('I know you can'), script_line('You can leave.')]
+        heard = transcript('I know you can leave.')
+        for word in heard['segments'][0]['words'][2:]:
+            word['start'] += .5
+            word['end'] += .5
+        extra = []
+        rows = build_cues(heard, lines, 'en', {'script_only': True}, extra)
+        self.assertEqual([row['text'] for row in rows], ['You can leave.'])
+        self.assertEqual(rows[0]['start_ms'], 1100)
+        self.assertEqual([[word['text'] for word in fragment] for fragment in extra], [['I', 'know']])
+
     def test_partial_script_is_flagged_but_a_complete_line_split_by_pause_is_not(self):
         line = script_line('Nobody asked you.')
         settings = {'script_only': True}
@@ -278,6 +319,16 @@ class GenerationTests(unittest.TestCase):
             ["That's Zero.", 'Light him up!'],
             ['Dr. Chen has 2.5 seconds.', 'Ready?', 'Go!'],
         ])
+
+    def test_chinese_sentence_cuts_keep_closing_punctuation_with_dialogue(self):
+        from app.generation import sentence_chunks
+        self.assertEqual(sentence_chunks('【快走。】回头见！'), ['【快走。】', '回头见！'])
+        self.assertEqual(sentence_chunks('选 A。我们走。'), ['选 A。', '我们走。'])
+
+    def test_fullwidth_period_splits_sentences_but_keeps_decimals(self):
+        from app.generation import sentence_chunks
+        self.assertEqual(sentence_chunks('选 A．我们走．'), ['选 A．', '我们走．'])
+        self.assertEqual(sentence_chunks('版本 １．５ 已发布．下一句．'), ['版本 １．５ 已发布．', '下一句．'])
 
     def test_ai_wrap_preserves_words_and_punctuation_and_uses_timed_boundaries(self):
         long_line = "You always have an answer after you've already hurt me."
@@ -585,6 +636,38 @@ class GenerationTests(unittest.TestCase):
         self.assertFalse(self.p.data['cues'][1]['accepted']['deleted'])
         self.p.undo()
         self.assertEqual(self.p.data['cues'], [original])
+
+    def test_split_rejects_out_of_bounds_saved_draft_without_adding_cue(self):
+        from app.subtitle_layout import layout
+        add_video(self.p, 32, self.media, 'en')
+        install_cues(self.p, '32', transcript('Go now.'))
+        cue = self.p.data['cues'][0]
+        duration = self.p.data['episodes']['32']['duration_ms']
+        cue['draft'] = dict(cue['accepted'], end_ms=duration + 1000)
+        original = copy.deepcopy(self.p.data)
+        for point in (300, duration + 500):
+            with self.subTest(point=point):
+                with self.assertRaisesRegex(UserError, '超出片长'):
+                    layout(self.p, cue['id'], 'split',
+                           {'boundary_ms': point, 'left': 'Go', 'right': 'now.'})
+                self.assertEqual(self.p.data, original)
+
+    def test_split_rejects_stale_preview_and_noninteger_cut(self):
+        from app.subtitle_layout import layout
+        add_video(self.p, 32, self.media, 'en')
+        install_cues(self.p, '32', transcript('Go now.'))
+        cue = self.p.data['cues'][0]
+        preview = copy.deepcopy(cue['accepted'])
+        cue['draft'] = dict(preview, text='Go right now.')
+        original = copy.deepcopy(self.p.data)
+        values = {'boundary_ms': 300, 'left': 'Go', 'right': 'now.', 'before': preview}
+        with self.assertRaisesRegex(UserError, '字幕内容或时间已变化'):
+            layout(self.p, cue['id'], 'split', values)
+        self.assertEqual(self.p.data, original)
+        values.update(before=cue['draft'], boundary_ms=300.5)
+        with self.assertRaisesRegex(UserError, '拆分点须位于'):
+            layout(self.p, cue['id'], 'split', values)
+        self.assertEqual(self.p.data, original)
 
     def test_queue_continues_after_one_episode_fails_using_saved_transcript(self):
         import wave

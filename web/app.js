@@ -241,8 +241,8 @@ function renderReview(forceEditor=false){
  renderCueList();renderEditor(forceEditor);
  const stand=p().issues.filter(i=>!i.cue_id&&(!episode||i.episode===episode)&&!i.resolved&&!i.excluded_by_user&&(i.script_only_extra||i.triage?.result!=='dismissed')).filter((i,n,all)=>all.findIndex(x=>(x.triage?.group_id||x.id)===(i.triage?.group_id||i.id))===n);
  if(p().mode==='generation'){
-  const evidence=stand.map(i=>`<div class="evidence" data-standalone-id="${esc(i.id)}"><strong>${esc(i.kind)} · 第 ${esc(i.episode)} 集 ${time(i.start_ms)}</strong><p>${esc(i.message||'')}${i.evidence_text?'\n'+esc(i.evidence_text):''}</p>${i.clip||p().episodes[i.episode]?.audio?`<button data-play-issue="${i.id}">试听疑点</button>`:''}<button data-add-issue="${i.id}">补一条字幕</button>${i.script_only_extra?`<button data-ignore-script-extra="${i.id}">确认不出字幕</button>`:''}</div>`).join('');
-  $('standalone-issues').innerHTML=stand.length?`<details class="card"><summary>未匹配到字幕的识别疑点 · ${stand.length} 段</summary>${evidence}</details>`:'';
+  const evidence=stand.map(i=>`<div class="evidence" data-standalone-id="${esc(i.id)}"><strong>${esc(i.kind)} · 第 ${esc(i.episode)} 集 ${time(i.start_ms)}</strong><p>${esc(i.message||'')}</p>${i.script_text?`<p>文稿 · ${esc(i.script_text)}</p>`:''}${i.evidence_text?`<p>识别 · ${esc(i.evidence_text)}</p>`:''}${i.clip||p().episodes[i.episode]?.audio?`<button data-play-issue="${i.id}">试听疑点</button>`:''}<button data-add-issue="${i.id}">补一条字幕</button>${i.script_only_extra?`<button data-ignore-script-extra="${i.id}">确认不出字幕</button>`:''}</div>`).join('');
+  $('standalone-issues').innerHTML=stand.length?`<details class="card" ${stand.some(i=>i.script_text)?'open':''}><summary>未匹配片段待试听 · ${stand.length} 段</summary>${evidence}</details>`:'';
   return;
  }
  $('standalone-issues').innerHTML=stand.length?`<details class="card"><summary>范围外记录（无对应字幕）· ${stand.length} 组，不影响导出</summary><p>本项目只审已有字幕，无须补写或逐条人工处理。可选中后批量收起，原证据保留。</p><div class="button-row"><button id="outside-all">全选当前范围外记录</button><button id="outside-none">取消选择</button><button id="outside-ignore">批量收起所选</button></div>${stand.map(i=>`<div class="evidence"><label><input type="checkbox" data-outside="${i.id}" ${outsideSelected.has(i.id)?'checked':''}> ${esc(i.kind)} · 第${i.episode}集 ${time(i.start_ms)}</label><p>${esc(i.evidence_text)}</p><button data-play-issue="${i.id}">试听证据（可选）</button></div>`).join('')}</details>`:'';
@@ -463,7 +463,7 @@ async function addCue(issue=null){
   if(boundedStart<boundedEnd){start=boundedStart;end=boundedEnd;}
   else if(boundedStart!==start||boundedEnd!==end)throw Error('该疑点与现有字幕重叠，请先试听并调整相邻字幕的入点或出点。');
  }
- const d=await showDialog('补一条漏掉的字幕',`<p>新字幕先作为草稿，确认通过后才进入导出。</p><label>集数<input name="episode" value="${esc(ep)}"></label><label>英文字幕<textarea name="text" rows="3">${esc(issue?.evidence_text||'')}</textarea></label><div class="time-inputs"><label>入点<input name="start" value="${time(start)}"></label><label>出点<input name="end" value="${time(end)}"></label></div>`,'保存为草稿');
+ const d=await showDialog('补一条漏掉的字幕',`<p>新字幕先作为草稿，确认通过后才进入导出。</p><label>集数<input name="episode" value="${esc(ep)}"></label><label>字幕<textarea name="text" rows="3">${esc(issue?.script_text||issue?.evidence_text||'')}</textarea></label><div class="time-inputs"><label>入点<input name="start" value="${time(start)}"></label><label>出点<input name="end" value="${time(end)}"></label></div>`,'保存为草稿');
  if(!d)return;$('filter-status').value='pending';$('filter-kind').value='';$('search').value='';const id=await mutate('add-cue',{episode:d.episode,issue_id:issue?.id,row:{text:d.text,start_ms:parseTime(d.start),end_ms:parseTime(d.end)}});activeId=id;episode=d.episode;editorId='';renderReview(true);
 }
 

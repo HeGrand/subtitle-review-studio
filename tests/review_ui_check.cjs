@@ -11,13 +11,35 @@ const root=fs.mkdtempSync(path.join(process.env.REVIEW_TEST_ROOT||require('node:
  browser=await chromium.launch({headless:true,...(process.env.REVIEW_BROWSER_PATH?{executablePath:process.env.REVIEW_BROWSER_PATH}:{})});
  page=await browser.newPage({viewport:{width:1540,height:1080}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(url);
- if(process.env.REVIEW_TEST_MERGE_PREVIOUS||process.env.REVIEW_TEST_ONSET){
+ if(process.env.REVIEW_TEST_MERGE_PREVIOUS||process.env.REVIEW_TEST_ONSET||process.env.REVIEW_TEST_LAYOUT){
   await page.click('#home-open');
   await page.fill('#project-folder',path.join(root,'generated'));
   await page.click('#modal-ok');
   await page.waitForFunction(()=>p()?.mode==='generation');
   await page.click('[data-tab="review"]');
   await page.selectOption('#filter-status','all');
+  if(process.env.REVIEW_TEST_LAYOUT){
+   await page.locator('.cue-row').first().click();
+   const [first, next]=await page.evaluate(()=>p().cues.map(c=>c.id));
+   await page.click('#split-cue');
+   await page.fill('#modal [name="left"]','Hel');
+   await page.fill('#modal [name="right"]','lo.');
+   await page.fill('#modal [name="boundary"]','00:00:00,400');
+   await page.click('#modal-ok');
+   await page.waitForFunction(id=>cue(id)?.accepted.end_ms===400&&p().cues.some(c=>c.accepted.start_ms===400&&c.accepted.text==='lo.'),first);
+   await page.click('#undo');
+   await page.waitForFunction(id=>cue(id)?.accepted.end_ms===700&&p().cues.length===2,first);
+   await page.locator('.cue-row').first().click();
+   await page.click('#shared-boundary');
+   await page.fill('#modal [name="boundary"]','00:00:00,850');
+   await page.click('#modal-ok');
+   await page.waitForFunction(([a,b])=>cue(a)?.draft?.end_ms===850&&cue(b)?.draft?.start_ms===850,[first,next]);
+   await page.click('#undo');
+   await page.waitForFunction(([a,b])=>!cue(a)?.draft&&!cue(b)?.draft&&cue(a)?.accepted.end_ms===700&&cue(b)?.accepted.start_ms===1000,[first,next]);
+   assert.deepEqual(errors,[]);
+   console.log('PASS split, shared boundary and undo');
+   return;
+  }
   if(process.env.REVIEW_TEST_ONSET){
    await page.locator('.cue-row').first().click();
    const id=await page.evaluate(()=>activeId);

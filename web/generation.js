@@ -291,7 +291,8 @@ ${r.text}`).join('\n\n'):'（无字幕）';
    const result=showDialog('拆分此条字幕',`${SplitWave.markup()}<label>前半句<textarea name="left" rows="2" required>${esc(r.text.slice(0,cursor).trim())}</textarea></label><label>后半句<textarea name="right" rows="2" required>${esc(r.text.slice(cursor).trim())}</textarea></label><label>拆分时间<input name="boundary" value="${time(point)}" required></label>`,'保存拆分');
    const controller=SplitWave.mount(r,c.episode,point);let d;
    try{d=await result;}finally{controller.dispose();}
-   if(d)await mutate('subtitle-layout',{id:c.id,action:'split',values:{left:d.left,right:d.right,boundary_ms:parseTime(d.boundary)}});
+   if(d)await mutate('subtitle-layout',{id:c.id,action:'split',
+    values:{left:d.left,right:d.right,boundary_ms:parseTime(d.boundary),before:r}});
   }else{
    const previous=action==='merge-prev';
    const rows=p().cues.filter(x=>x.episode===c.episode&&!current(x).deleted)

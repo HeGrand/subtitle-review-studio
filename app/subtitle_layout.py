@@ -59,16 +59,19 @@ def layout(project, cue_id, action, values):
         project.commit('采用 AI 断句建议（待听改）', before)
         return {'id': cue_id}
     row = copy.deepcopy(proposed(cue))
+    duration = project.data['episodes'][cue['episode']]['duration_ms']
     before = [copy.deepcopy(cue)]
     extra = {}
     if action == 'split':
-        boundary = int(values['boundary_ms'])
+        if 'before' in values and values['before'] != row:
+            raise UserError('字幕内容或时间已变化，请重新打开拆分。')
+        boundary = values.get('boundary_ms')
         left, right = str(values['left']).strip(), str(values['right']).strip()
-        if not row['start_ms'] < boundary < row['end_ms'] or not left or not right:
+        if type(boundary) is not int or not row['start_ms'] < boundary < row['end_ms'] or not left or not right:
             raise UserError('拆分点须位于字幕时间范围内，两段文字不能为空')
         second = dict(row, text=right, start_ms=boundary)
         row.update(text=left, end_ms=boundary)
-        errors = validate_row(row) + validate_row(second)
+        errors = validate_row(row, duration) + validate_row(second, duration)
         if errors:
             raise UserError('；'.join(errors))
         cid = uuid.uuid4().hex
@@ -94,7 +97,7 @@ def layout(project, cue_id, action, values):
         row.update(text=str(values['text']).strip(), end_ms=max(row['end_ms'], tail['end_ms']))
         if not row['text']:
             raise UserError('合并文字不能为空')
-        errors = validate_row(row, project.data['episodes'][cue['episode']]['duration_ms'])
+        errors = validate_row(row, duration)
         if errors:
             raise UserError('；'.join(errors))
         other['accepted'] = dict(tail, deleted=True)
@@ -103,9 +106,6 @@ def layout(project, cue_id, action, values):
         cue['note'] = '；'.join(x for x in (cue.get('note', ''), other.get('note', '')) if x)
     else:
         raise UserError('未知断句操作')
-    errors = validate_row(row, project.data['episodes'][cue['episode']]['duration_ms'])
-    if errors:
-        raise UserError('；'.join(errors))
     cue.pop('script_coverage', None)
     cue.update(accepted=row, draft=None, status='pending', manual_hold=True,
                generation_source=None, script_locator=row['text'], confirmed_at=None)

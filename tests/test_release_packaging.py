@@ -34,6 +34,17 @@ class ReleasePackagingTests(unittest.TestCase):
         profile=self.root/'.runtime/desktop-user-data';profile.mkdir();(profile/'Cookies').write_text('synthetic private profile')
         self.assertNotEqual(self.run_packager().returncode,0);(profile/'Cookies').unlink();profile.rmdir()
         self.assertNotEqual(self.run_packager('--tag','../../outside').returncode,0)
+    def test_whisperx_overlay_uses_the_program_root(self):
+        runtime=self.root/'.runtime/whisperx';runtime.mkdir(parents=True)
+        (runtime/'components.json').write_text('{}',encoding='utf-8')
+        result=self.run_packager();self.assertEqual(result.returncode,0,result.stderr)
+        with zipfile.ZipFile(next(self.out.glob('*windows-x64.zip'))) as z:
+            self.assertFalse(any('/whisperx/' in name for name in z.namelist()))
+        with zipfile.ZipFile(next(self.out.glob('*whisperx-en-addon.zip'))) as z:
+            self.assertIn('.runtime/whisperx/components.json',z.namelist())
+            manifest=json.loads(z.read('WhisperX组件文件清单_SHA256.json'))
+            self.assertEqual(manifest[0]['sha256'],hashlib.sha256(b'{}').hexdigest())
+        self.assertIn('whisperx-en-addon', (self.out/'INSTALL.txt').read_text(encoding='utf-8'))
     def test_asset_limit_fails_before_publication(self):
         spec=importlib.util.spec_from_file_location('release_packager',ROOT/'scripts/package_release.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         module.LIMIT=1

@@ -3,8 +3,10 @@ const {app,BrowserWindow,ipcMain,dialog,Menu}=require('electron');
 const fs=require('node:fs');const fsp=fs.promises;const path=require('node:path');const http=require('node:http');const {spawn}=require('node:child_process');
 const {normalizeAbsolute}=require('./paths.cjs');
 const root=fs.realpathSync(process.env.SUBTITLE_APP_ROOT||path.join(__dirname,'..'));
+const appId='SubtitleReviewStudio.Desktop';
+const studioIcon=path.join(__dirname,'studio.ico');
 const userData=path.join(root,'.runtime','desktop-user-data');fs.mkdirSync(userData,{recursive:true});app.setPath('userData',userData);
-if(process.platform==='win32')app.setAppUserModelId('SubtitleReviewStudio.Desktop');
+if(process.platform==='win32')app.setAppUserModelId(appId);
 let window,backend,origin='',approvedExit=false,closePending=false;
 function get(url,headers={}){return new Promise((resolve,reject)=>{
  const request=http.get(url,{headers,timeout:2000},response=>{let body='';response.setEncoding('utf8');response.on('data',chunk=>body+=chunk);response.on('end',()=>response.statusCode===200?resolve(body):reject(Error('HTTP '+response.statusCode)));});
@@ -86,7 +88,11 @@ else{
   try{
    const url=await startServer();origin=new URL(url).origin;
    Menu.setApplicationMenu(null);
-   window=new BrowserWindow({title:'字幕工作室',width:1500,height:1000,minWidth:1000,minHeight:650,show:false,icon:path.join(__dirname,'studio.ico'),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
+   window=new BrowserWindow({title:'字幕工作室',width:1500,height:1000,minWidth:1000,minHeight:650,show:false,icon:studioIcon,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
+   const launcher=path.join(root,'字幕工作室.exe');
+   if(process.platform==='win32'&&fs.existsSync(launcher)){
+    window.setAppDetails({appId,appIconPath:launcher,relaunchCommand:`"${launcher}"`,relaunchDisplayName:'字幕工作室'});
+   }
    window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
    window.webContents.on('will-navigate',(event,target)=>{if(new URL(target).origin!==origin)event.preventDefault();});
    window.on('close',event=>{if(!approvedExit){event.preventDefault();if(!closePending){closePending=true;window.webContents.send('subtitle:close-request');}}});

@@ -303,7 +303,7 @@ class Project:
                 if h.get('extra', {}).get('episode') and h['extra'].get('archive')})
         for c in d['cues']:
             c['current'] = proposed(c)
-        from .review import category, LABELS, human_reasons, issue_pending, issue_in_scope, task_in_scope
+        from .review import category, LABELS, human_reasons, issue_pending, issue_in_scope, task_in_scope, valid_local_alignment
         from .terminology import context
         review_data,terms = context(self)
         from .script_context import annotate_entries, tokens
@@ -332,6 +332,8 @@ class Project:
                     c['note'] = '；'.join(note for note in c.get('note', '').split('；') if note != outdated)
             c['category'] = category(c, review_data)
             c['category_label'] = LABELS[c['category']]
+            if c['category'] == 'text_clear' and valid_local_alignment(c):
+                c['category_label'] = '本地文稿对齐通过'
             c['human_reasons']=human_reasons(c,review_data)
             counts[c['category']] += 1
         runs = d.get('api_review_runs', {})
@@ -840,7 +842,7 @@ class Project:
                 if ((scope in wanted or scope not in self.data['episodes'])
                         and (not issue.get('cue_id') or retained)
                         and issue_in_scope(self.data, issue) and issue_pending(issue)):
-                    excerpt = issue.get('evidence_text') or issue.get('message') or issue['id']
+                    excerpt = issue.get('script_text') or issue.get('evidence_text') or issue.get('message') or issue['id']
                     errors.append(f'{scope or "集数未定位"} · {stamp(issue.get("start_ms", 0))}：{issue.get("kind", "独立疑点")}待处理，{excerpt[:100]}')
             if any(not x.get('resolved') for x in self.data['opinion_conflicts']):
                 errors.append('有待处理的意见导入冲突')

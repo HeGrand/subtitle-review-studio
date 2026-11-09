@@ -356,8 +356,14 @@ def units(text):
     return result
 
 
+CLOSING_SENTENCE_MARKS = "\"'”’）)］]｝}」』】〕》〉"
+
+
 def sentence_end(text):
-    tail = text.translate(SUBTITLE_PUNCTUATION).rstrip().rstrip('"\')]}')
+    tail = text.rstrip().rstrip(CLOSING_SENTENCE_MARKS)
+    if tail.endswith(('。', '．')):
+        return True
+    tail = tail.translate(SUBTITLE_PUNCTUATION)
     return tail.endswith(('!', '?')) or (
         tail.endswith('.') and not tail.endswith('...')
         and not re.search(r"\b(?:Mr|Mrs|Ms|Dr|St|Jr|Sr|vs|etc|[A-Z])\.$", tail)
@@ -367,8 +373,11 @@ def sentence_end(text):
 def sentence_chunks(text):
     start = 0
     chunks = []
-    for mark in re.finditer(r"""[.!?。．！？]+["'”’）)\]}」』]*""", text):
+    for mark in re.finditer(rf"[.!?。．！？]+[{re.escape(CLOSING_SENTENCE_MARKS)}]*", text):
         end = mark.end()
+        if (mark.group() == '．' and mark.start() > 0 and end < len(text)
+                and text[mark.start() - 1].isdecimal() and text[end].isdecimal()):
+            continue
         if end < len(text) and text[end - 1] == '.' and text[end].isascii() and text[end].isalnum():
             continue
         if sentence_end(text[start:end]) and units(text[start:end]):
@@ -616,6 +625,12 @@ def build_cues(transcript, script_lines, lang, settings=None, unmatched=None):
     for line_index, words in enumerate(source):
         for k, word in enumerate(words):
             starts.setdefault(word['norm'], []).append((line_index, k))
+    block_ends = {}
+    if script_only:
+        # A complete match bounded by pauses can displace a longer match that crosses a pause.
+        boundaries = [0] + [i for i in range(1, len(heard))
+                            if round(heard[i]['start'] * 1000) - round(heard[i - 1]['end'] * 1000) >= 500]
+        block_ends = dict(zip(boundaries, boundaries[1:] + [len(heard)]))
     candidates = []
     for j, word in enumerate(heard):
         found = []
@@ -624,20 +639,21 @@ def build_cues(transcript, script_lines, lang, settings=None, unmatched=None):
             while j + count < len(heard) and k + count < len(source[li]) and heard[j + count]['norm'] == source[li][k + count]['norm']:
                 count += 1
             if count >= 2 or (count == 1 and len(source[li]) == 1):
-                found.append((count, j, li, k))
+                complete = k == 0 and count == len(source[li])
+                isolated = complete and count >= 2 and block_ends.get(j) == j + count
+                found.append((isolated, count, complete, j, li, k))
         if found:
-            def rank(match):
-                length, _, line, offset = match
-                return length, offset == 0 and length == len(source[line])
-            highest = max(map(rank, found))
-            best = [x for x in found if rank(x) == highest]
+            highest = max(match[:3] for match in found)
+            best = [match for match in found if match[:3] == highest]
             if len(best) == 1:
                 candidates.append(best[0])
-    for length, start, li, k in sorted(candidates, key=lambda x: (-x[0], x[1])):
-        for offset in range(length):
-            w = heard[start + offset]
-            if w['line'] is None:
-                w.update(line=li, script_word=k + offset, text=source[li][k + offset]['text'])
+    for _, length, _, start, li, k in sorted(candidates, key=lambda x: (-x[0], -x[1], x[3])):
+        run = heard[start:start + length]
+        if any(w['line'] is not None and (w['line'], w['script_word']) != (li, k + offset)
+               for offset, w in enumerate(run)):
+            continue
+        for offset, w in enumerate(run):
+            w.update(line=li, script_word=k + offset, text=source[li][k + offset]['text'])
     # A single differing word between two anchors can belong to the same
     # script line without being a confirmed text match.
     for left, word, right in zip(heard, heard[1:], heard[2:]):
@@ -928,7 +944,8 @@ def build_cues(transcript, script_lines, lang, settings=None, unmatched=None):
     return result
 
 
-def install_cues(project, episode, transcript, speech_regions=(), prepared_rows=None, unmatched=None):
+def install_cues(project, episode, transcript, speech_regions=(), prepared_rows=None, unmatched=None,
+                 unmatched_script=(), local_alignment=False):
     require_generation(project)
     if has_generated(project, episode):
         raise UserError('本集已有生成记录，请使用生成队列中的重新匹配。')
@@ -976,6 +993,7 @@ def install_cues(project, episode, transcript, speech_regions=(), prepared_rows=
             'original': copy.deepcopy(row), 'accepted': copy.deepcopy(row), 'draft': None, 'status': 'pending',
             'note': '；'.join(item['reasons']), 'opinions': [], 'confirmed_at': None,
             'generation_source': item['generation_source'],
+            **({'local_alignment_hash': digest(row)} if local_alignment and not item['reasons'] else {}),
             **{key: item[key] for key in ('local_retry', 'script_coverage', 'time_adjustments') if item.get(key)}})
     ep.update(original_srt=relative, source_srt=str(target), srt_fingerprint=fp,
               local_status='字幕已生成，进入听改', duration_ms=round(transcript['duration'] * 1000))
@@ -989,5 +1007,14 @@ def install_cues(project, episode, transcript, speech_regions=(), prepared_rows=
             'kind': '文稿外识别', 'script_only_extra': True, 'start_ms': start, 'end_ms': end,
             'message': '这段识别文字未能匹配文稿，仅供试听。',
             'evidence_text': joined(fragment, lang), 'clip': None})
+    for item in unmatched_script:
+        project.data['issues'].append({
+            'id': uuid.uuid4().hex, 'episode': episode, 'cue_id': None, 'resolved': False,
+            'kind': '文稿待定位', 'script_only_extra': True,
+            'start_ms': item['start_ms'], 'end_ms': item['end_ms'], 'script_text': item['script_text'],
+            'evidence_text': item['evidence_text'], 'clip': None,
+            'message': ('音频证据不足。此范围由相邻字幕定位，请试听后确认。' if item['estimated']
+                        else '识别到了候选片段，词级时间未通过校验，请试听后确认。')})
     project.commit('从剧本与成片生成字幕', extra={'episode': episode, 'count': len(rows)})
-    return {'count': len(rows), 'flagged': sum(bool(r['reasons']) for r in rows)}
+    return {'count': len(rows), 'flagged': sum(bool(r['reasons']) for r in rows),
+            'unmatched_count': len(unmatched or ()) + len(unmatched_script)}

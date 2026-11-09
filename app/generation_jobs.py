@@ -27,6 +27,48 @@ def retry_windows(rows, duration_ms):
     return windows
 
 
+def run_whisperx(processor, project, key, audio, evidence, lines, settings, model_path, download_model):
+    backend = processor.automatic_backend(project, key, model_path, download_model, audio)
+    plan = project.root / 'cache/tmp' / (key + '-whisperx-plan.json')
+    result = project.root / 'cache/tmp' / (key + '-whisperx-result.json')
+    transcript_path = evidence / 'transcript-whisperx.json'
+    atomic_json(plan, {'lines': lines, 'settings': settings})
+    try:
+        # The optional system-Python stack has its own dependencies.
+        command = [sys.executable, '-E', '-X', 'utf8', '-m', 'app.whisperx_match', '--audio', str(audio), '--model', model_path,
+                   '--download-model', download_model, '--cache', str(project.root / 'cache/models'),
+                   '--plan', str(plan), '--output', str(result), '--device', backend['device']]
+        processor.update(project, key, status='running', progress=20, device=backend['device'],
+                         message='WhisperX 听写与文稿词级对齐')
+        try:
+            processor.execute_child(command, project, key)
+        except UserError as exc:
+            from .acceleration import record_fallback
+            if backend['device'] != 'cuda' or not any(x in str(exc).lower() for x in ('cuda', 'cublas', 'cudnn', 'out of memory')):
+                raise
+            record_fallback(backend, exc)
+            command[-1] = 'cpu'
+            processor.update(project, key, device='cpu', message='WhisperX GPU 未完成，使用 CPU 继续')
+            processor.execute_child(command, project, key)
+        data = read_json(result)
+        with processor.mutex:
+            if processor.stop.is_set():
+                raise InterruptedError('已暂停')
+            before = copy.deepcopy(project.data)
+            try:
+                atomic_json(transcript_path, data['transcript'])
+                project.data['episodes'][key]['transcript'] = str(transcript_path.relative_to(project.root))
+                return install_cues(project, key, data['transcript'], prepared_rows=data['rows'],
+                                    unmatched=data['unmatched'], unmatched_script=data['issues'], local_alignment=True)
+            except Exception:
+                project.data = before
+                project.save()
+                raise
+    finally:
+        plan.unlink(missing_ok=True)
+        result.unlink(missing_ok=True)
+
+
 def run_generation(processor, project, episodes, model_path, download_model):
     for key in episodes:
         if processor.stop.is_set():
@@ -52,6 +94,19 @@ def run_generation(processor, project, episodes, model_path, download_model):
             wavefile = project.root / 'cache/waveforms' / (key + '.json')
             if not wavefile.exists():
                 waveform(audio, wavefile)
+            generation = project.data.get('generation', {})
+            lines = [line for line in generation.get('lines', [])
+                     if line['episode'] == key and line['language'] == ep['generation_language']]
+            enhanced = ep['generation_language'] == 'en' and bool(lines)
+            if enhanced:
+                from .whisperx_match import available
+                if available(model_path):
+                    result = run_whisperx(processor, project, key, audio, evidence, lines,
+                                          generation.get('settings', {}), model_path, download_model)
+                    processor.update(project, key, status='done', progress=100,
+                                     seconds=round(time.monotonic() - began, 2), audio_seconds=round(duration, 3),
+                                     message=f"WhisperX 已生成 {result['count']} 条，{result['unmatched_count']} 段待试听")
+                    continue
             transcript_path = evidence / 'transcript.json'
             if not transcript_path.exists():
                 backend = processor.automatic_backend(project, key, model_path, download_model, audio)
@@ -72,9 +127,6 @@ def run_generation(processor, project, episodes, model_path, download_model):
             if processor.stop.is_set():
                 raise InterruptedError('已暂停，识别分段保留')
             transcript = read_json(transcript_path)
-            generation = project.data.get('generation', {})
-            lines = [line for line in generation.get('lines', [])
-                     if line['episode'] == key and line['language'] == ep['generation_language']]
             unmatched = []
             rows = build_cues(transcript, lines, ep['generation_language'],
                               {**generation.get('settings', {}), 'script_only': True}, unmatched)
@@ -115,6 +167,7 @@ def run_generation(processor, project, episodes, model_path, download_model):
                 elapsed = round(time.monotonic() - began, 2)
                 project.data['jobs'][key].update(status='done', progress=100, seconds=elapsed,
                     audio_seconds=round(duration, 3), message=f"已生成 {result['count']} 条，{result['flagged']} 条建议优先听改"
+                    + (' · WhisperX 环境不可用，使用原匹配' if enhanced else '')
                     + (' · 人声检测未完成，请试听入点' if regions is None else '')
                     + (' · 二次识别未完成，请听改' if retry_failed else ''))
                 project.save()

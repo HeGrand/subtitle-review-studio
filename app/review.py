@@ -19,6 +19,11 @@ def api_review_reason(c):
     return review.get('reason') if review.get('snapshot_hash') == digest(c['accepted']) else None
 
 
+def valid_local_alignment(c):
+    snapshot = c.get('local_alignment_hash')
+    return bool(snapshot and snapshot == digest(c['accepted']))
+
+
 def issue_pending(i):
     return not i.get('resolved') and (
         i.get('script_only_extra') or i.get('triage', {}).get('result') != 'dismissed'
@@ -98,7 +103,7 @@ def category(c, data):
         return 'correction'
     api = c.get('api_review', {})
     api_clear = api.get('result') == 'clear' and api.get('snapshot_hash') == digest(c['accepted'])
-    if r.get('result') in ('clear', 'correction_applied') or api_clear:
+    if r.get('result') in ('clear', 'correction_applied') or api_clear or valid_local_alignment(c):
         if any(i.get('cue_id') in related and issue_pending(i) for i in data['issues']):
             return 'candidate'
         return 'ai_corrected' if r.get('result') == 'correction_applied' else 'text_clear'

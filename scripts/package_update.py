@@ -19,13 +19,13 @@ def main():
         if p.is_file() and p.suffix!='.log':files.append((p,'.runtime/desktop/'+p.relative_to(engine).as_posix()))
     forbidden={'project.json','recent.json','server.json','acceleration.json','ai-config.json','.subtitle-review.lock','Cookies'}
     if any(p.name in forbidden or 'desktop-user-data' in p.parts for p,_ in files):raise ValueError('Update contains private state')
-    instructions='字幕工作室 v0.3.0 更新包\n\n1. 先在旧页面保存并关闭项目，再关闭旧启动窗口/应用。\n2. 将本更新包解压到含原启动入口的程序目录，允许覆盖程序代码。不要解压到业务项目目录。\n3. 双击“字幕工作室.exe”，界面页脚应显示v0.3.0并默认打开桌面窗口。\n4. 桌面版支持直接拖入本机及有访问权限的共享盘文件夹；JSON和剧本拖到对应区域可导入。桌面选择文件使用 Windows 文件窗口，视频可多选。\n\n本包不含模型、GPU组件、项目、审核进度或最近记录，不需要重新下载模型/GPU。原项目仍从原目录打开，不必重新导入旧意见。\n'
+    instructions='字幕工作室 v0.3.1 更新包\n\n1. 先在旧页面保存并关闭项目，再关闭旧启动窗口/应用。\n2. 将本更新包解压到含原启动入口的程序目录，允许覆盖程序代码。不要解压到业务项目目录。\n3. 双击“字幕工作室.exe”，界面页脚应显示v0.3.1并默认打开桌面窗口。\n4. 桌面版支持直接拖入本机及有访问权限的共享盘文件夹；JSON和剧本拖到对应区域可导入。桌面选择文件使用 Windows 文件窗口，视频可多选。\n\n本包不含模型、GPU组件、项目、审核进度或最近记录，不需要重新下载模型/GPU。原项目仍从原目录打开，不必重新导入旧意见。\n'
     manifest=[]
     with zipfile.ZipFile(output,'x',compression=zipfile.ZIP_DEFLATED,compresslevel=1) as z:
         for p,name in files:
             with p.open('rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
             manifest.append({'path':name,'bytes':p.stat().st_size,'sha256':digest});z.write(p,name)
-        z.writestr('更新说明_v0.3.0.txt',instructions);z.writestr('更新文件_SHA256.json',json.dumps(manifest,ensure_ascii=False,indent=2))
+        z.writestr('更新说明_v0.3.1.txt',instructions);z.writestr('更新文件_SHA256.json',json.dumps(manifest,ensure_ascii=False,indent=2))
     with output.open('rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
     output.with_suffix('.zip.sha256.txt').write_text(digest+'  '+output.name+'\n',encoding='utf-8')
     print(json.dumps({'zip':str(output),'bytes':output.stat().st_size,'sha256':digest},ensure_ascii=False),flush=True)

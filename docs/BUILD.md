@@ -42,6 +42,8 @@ python scripts/build_portable.py `
 
 构建会复制当前 Python 的运行文件和标准库，使用相对 `_pth` 隔离系统 Python、注册表路径和用户 site-packages，并复制 `.runtime/deps`。模型缓存中的链接会转换为独立文件。存在 `.runtime/gpu` 时也会包含它。
 
+如需完整英文文稿匹配包，使用已验证装有 WhisperX 3.2.0、faster-whisper 1.2.1 和 CPU PyTorch 的同版 Python 构建，追加 `--whisperx-checkpoint <本机的 wav2vec2_fairseq_base_ls960_asr_ls960.pth>`。构建会将这一组依赖与基础识别依赖分开放置，并保留组件版本及英文对齐模型许可。
+
 只有构建产物会写到指定输出目录，不读取业务项目、最近项目或个人测速配置。
 
 ## 5. 验收并封包
@@ -62,6 +64,6 @@ python scripts/package_release.py `
   --output ..\release-assets
 ```
 
-会生成 CPU 可用的主程序包、可选 GPU 组件包、文件校验和使用说明。每个附件都会检查不超过 2GiB，主程序不含 GPU 组件和任何业务进度，GPU 包解压到主程序目录即可合并使用。
+会生成 CPU 可用的主程序包、可选 GPU 和英文 WhisperX 组件包、文件校验和使用说明。每个附件都会检查小于 2 GiB。将所需组件解压到含启动器的主程序目录，合并 `.runtime` 后即可使用。
 
 仓库中的 `release-portable.yml` 是手动运行的发布工作流，不会在每次提交时构建大模型包。它在 GitHub Windows runner 上准备组件、运行检查、创建草稿 release，附件齐全后才公开发布。
